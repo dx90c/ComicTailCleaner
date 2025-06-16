@@ -1,0 +1,22 @@
+
+---
+
+### ✅ `.gitignore`
+
+```gitignore
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Cache and logs
+cache/
+*.log
+
+# VSCode settings
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
