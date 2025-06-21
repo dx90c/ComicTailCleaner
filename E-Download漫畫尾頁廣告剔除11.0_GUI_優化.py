@@ -1,8 +1,7 @@
 #https://gemini.google.com/app/3e4d5e88b4e3b0c2
-
 # ======================================================================
 # 檔案名稱：E-Download漫畫尾頁廣告剔除11.0_GUI_優化.py
-# 版本號：11.0v4
+# 版本號：11.0v5
 #
 # === 程式說明 ===
 # 這是一個專為清理 E-Download 資料夾中漫畫檔案尾頁廣告的工具。
@@ -10,10 +9,14 @@
 # 適用於處理大量漫畫檔案，節省手動篩選時間。
 # 支援三種比對模式：廣告比對、互相比對和 QR Code 檢測。
 #
-# === 11.0v4 版本更新內容 ===
+# === 11.0v5 版本更新內容 ===
+# - **快取優化**: 掃描圖片哈希快取檔案 (`scanned_hashes_cache.json`) 現在會根據
+#   「根掃描資料夾」的路徑動態生成一個專屬的檔案名稱。
+#   例如：`scanned_hashes_cache_{根掃描資料夾路徑的SHA256哈希值}.json`。
+#   這確保了每個不同根掃描資料夾的快取相互獨立，避免數據混淆。
+# - **版本號更新**: 將版本號從 `11.0v4` 更新為 `11.0v5`。
 # - **功能調整**: 將「開啟所有選中資料夾」功能修改為「開啟選中資料夾」。
 #   現在只會開啟列表中第一個被反白選中（滑鼠選中）的圖片所在的資料夾，避免同時開啟過多視窗。
-# - **版本號更新**: 將版本號從 `11.0v3` 更新為 `11.0v4`。
 # - **修正錯誤**: 修正了「打開資料夾」功能在某些情況下錯誤地開啟「我的文件」資料夾的問題。
 #   現在使用更穩健的 `start` 命令透過 shell 開啟資料夾，以確保路徑正確解析。
 # - **基礎版本**: 此版本基於 "1140614谷歌版-可用版-只有調整排序.PY" 進行組織與命名更新。
@@ -29,6 +32,7 @@
 # 3. tkinter: Python 標準 GUI 庫
 # 4. pyzbar (可選): QR Code 掃描 (如果啟用了 QR Code 掃描功能)
 # 5. opencv-python (cv2, 可選): 圖片處理和 QR Code 掃描的底層庫 (如果啟用了 QR Code 掃描功能)
+# 6. hashlib: 用於生成文件路徑的哈希值
 #
 # 安裝方式：pip install Pillow imagehash pyzbar opencv-python
 #
@@ -54,6 +58,7 @@ import subprocess            # 用於啟動外部程式 (如打開資料夾)
 from collections import deque # 用於雙端佇列，可能用於歷史記錄或撤銷功能
 # 多進程相關模塊，通常需要在 main 或最頂層進行設置
 from multiprocessing import set_start_method, Pool, cpu_count # 引入 Pool 和 cpu_count
+import hashlib               # 新增：用於生成資料夾路徑的哈希值
 
 # === 2. 第三方庫導入 (Third-party Libraries) ===
 # (所有程式碼中用到的第三方庫，都應在此處導入一次)
@@ -329,15 +334,22 @@ class FolderCreationCacheManager:
 
 
 # New: Scanned image hash cache manager
-SCANNED_HASH_CACHE_FILE = "scanned_hashes_cache.json"
+# SCANNED_HASH_CACHE_FILE = "scanned_hashes_cache.json" # Removed global constant
 
 class ScannedImageHashesCacheManager:
     """
     管理掃描圖片的哈希值快取，包括圖片路徑、哈希值和檔案修改時間 (mtime)。
     用於避免重複計算已處理圖片的哈希。
+    這個快取檔案現在會根據 root_scan_folder 產生一個獨特的名稱。
     """
-    def __init__(self, cache_file_path=SCANNED_HASH_CACHE_FILE):
-        self.cache_file_path = cache_file_path
+    def __init__(self, root_scan_folder): # Modified: added root_scan_folder parameter
+        # Generate a unique cache file path based on the root_scan_folder
+        # Use SHA256 hash of the normalized root folder path to ensure valid and unique filename
+        # Added .encode('utf-8') for hashing string data
+        normalized_path = os.path.normpath(root_scan_folder).replace('\\', '/')
+        hash_object = hashlib.sha256(normalized_path.encode('utf-8'))
+        self.cache_file_path = f"scanned_hashes_cache_{hash_object.hexdigest()}.json"
+        
         self.cache = self._load_cache()
 
     def _load_cache(self):
@@ -1659,7 +1671,7 @@ def main():
         except Exception as e:
             log_error(f"設置多進程啟動方法時發生錯誤: {e}", include_traceback=True)
 
-    print("=== E-Download 漫畫尾頁廣告剔除 v11.0v4 - 啟動中 ===", flush=True) # Changed version to 11.0v4
+    print("=== E-Download 漫畫尾頁廣告剔除 v11.0v5 - 啟動中 ===", flush=True) # Changed version to 11.0v5
     check_and_install_packages()
     print("套件檢查完成。", flush=True)
     
@@ -1667,7 +1679,7 @@ def main():
     # Removed root.withdraw()
 
     folder_creation_cache_manager = FolderCreationCacheManager()
-    scanned_hashes_cache_manager = ScannedImageHashesCacheManager()
+    
 
     settings_gui = SettingsGUI(root, CONFIG_FILE, QR_SCAN_ENABLED)
     root.update() # Explicitly process events for the settings window to show
@@ -1683,6 +1695,15 @@ def main():
             folder_creation_cache_manager.invalidate_cache()
             folder_creation_cache_manager.save_cache()
             print("資料夾建立時間快取已清空。下次運行時將重新建立。", flush=True)
+
+        # Initialize ScannedImageHashesCacheManager AFTER getting root_scan_folder from config
+        # This ensures the cache file name is correctly generated based on the user's selection
+        if final_config_from_settings['root_scan_folder']: # Ensure root_scan_folder is not empty
+            scanned_hashes_cache_manager = ScannedImageHashesCacheManager(final_config_from_settings['root_scan_folder'])
+        else:
+            messagebox.showerror("錯誤", "未設定根掃描資料夾，無法初始化圖片哈希快取。程式將退出。")
+            root.destroy()
+            sys.exit(1)
 
         if rebuild_scanned_cache_flag:
             scanned_hashes_cache_manager.invalidate_cache()
