@@ -1,7 +1,6 @@
-#https://gemini.google.com/app/3e4d5e88b4e3b0c2
 # ======================================================================
 # 檔案名稱：E-Download漫畫尾頁廣告剔除11.0_GUI_優化.py
-# 版本號：11.0v5
+# 版本號：11.0v6
 #
 # === 程式說明 ===
 # 這是一個專為清理 E-Download 資料夾中漫畫檔案尾頁廣告的工具。
@@ -9,12 +8,17 @@
 # 適用於處理大量漫畫檔案，節省手動篩選時間。
 # 支援三種比對模式：廣告比對、互相比對和 QR Code 檢測。
 #
-# === 11.0v5 版本更新內容 ===
+# === 11.0v6 版本更新內容 ===
+# - **修正時間篩選邏輯**: 調整 `get_all_subfolders` 函數，確保時間篩選只應用於
+#   `root_scan_folder` (根掃描資料夾) 下的子資料夾，而不是根資料夾本身。
+#   這解決了當根資料夾建立時間不在篩選範圍內時，導致所有子資料夾都被跳過的問題。
+# - **哈希演算法優化**: 將圖片感知哈希比對演算法從 `average_hash` (ahash)
+#   更新為 `perceptual_hash` (phash)，以增加圖片相似度比對的準確度。
+# - **版本號更新**: 將版本號從 `11.0v5` 更新為 `11.0v6`。
 # - **快取優化**: 掃描圖片哈希快取檔案 (`scanned_hashes_cache.json`) 現在會根據
 #   「根掃描資料夾」的路徑動態生成一個專屬的檔案名稱。
 #   例如：`scanned_hashes_cache_{根掃描資料夾路徑的SHA256哈希值}.json`。
 #   這確保了每個不同根掃描資料夾的快取相互獨立，避免數據混淆。
-# - **版本號更新**: 將版本號從 `11.0v4` 更新為 `11.0v5`。
 # - **功能調整**: 將「開啟所有選中資料夾」功能修改為「開啟選中資料夾」。
 #   現在只會開啟列表中第一個被反白選中（滑鼠選中）的圖片所在的資料夾，避免同時開啟過多視窗。
 # - **修正錯誤**: 修正了「打開資料夾」功能在某些情況下錯誤地開啟「我的文件」資料夾的問題。
@@ -458,7 +462,8 @@ def calculate_image_hash(image_path, hash_size=8):
             img = ImageOps.exif_transpose(img) # Process EXIF orientation of the image
             # Convert to grayscale for hash calculation
             img = img.convert("L").resize((hash_size, hash_size), Image.Resampling.LANCZOS)
-            return imagehash.average_hash(img) # Return ImageHash object
+            # Changed from imagehash.average_hash to imagehash.phash
+            return imagehash.phash(img) # Return ImageHash object
     except FileNotFoundError:
         log_error(f"圖片檔案未找到: {image_path}", include_traceback=False) 
         return None
@@ -493,7 +498,7 @@ def load_ad_hashes(ad_folder_path, rebuild_cache=False):
         except json.JSONDecodeError:
             log_error(f"廣告哈希快取檔案 '{AD_HASH_CACHE_FILE}' 格式不正確，將重建快取。", include_traceback=True)
         except Exception as e:
-            log_error(f"載入廣告哈希快取時發生錯誤: {e}，將重建快取。", include_traceback=True)
+                log_error(f"載入廣告哈希快取時發生錯誤: {e}，將重建快取。", include_traceback=True)
     
     print(f"正在重建廣告圖片哈希快取，掃描資料夾: {ad_folder_path}", flush=True) # Added flush=True
     if os.path.isdir(ad_folder_path):
@@ -540,57 +545,67 @@ def get_all_subfolders(root_folder, excluded_folders=None, enable_time_filter=Fa
     if excluded_folders is None:
         excluded_folders = []
     
-    all_subfolders = []
+    all_subfolders_to_return = []
     
     if not os.path.isdir(root_folder):
-        log_error(f"根掃描資料夾不存在: {root_folder}", include_traceback=False) # Added include_traceback=False
+        log_error(f"根掃描資料夾不存在: {root_folder}", include_traceback=False)
         return []
 
-    # Convert excluded folders to a set of normalized paths for fast lookup
     excluded_norm_paths = {os.path.normpath(f) for f in excluded_folders}
 
     # Use deque for breadth-first traversal to prevent recursion depth limits for deep paths
-    folders_to_process = deque([root_folder])
+    folders_to_process_queue = deque([root_folder])
+    processed_folders_for_traversal = set() # To prevent re-processing same path (e.g., due to symlinks)
 
-    while folders_to_process:
-        current_folder = folders_to_process.popleft()
-        
-        # Check if in excluded list (only check folder's own name, not full path)
-        # Note: This only excludes by name, but if the full path is a subpath of an excluded path, it will also be excluded
-        # For more precision, check full normalized path
+    while folders_to_process_queue:
+        current_folder = folders_to_process_queue.popleft()
+
+        # Normalize and add to processed set to prevent infinite loops or redundant processing
         norm_current_folder = os.path.normpath(current_folder)
+        if norm_current_folder in processed_folders_for_traversal:
+            continue
+        processed_folders_for_traversal.add(norm_current_folder)
+
+        # Check if the current folder itself (or any of its parents) is excluded by name
+        # This exclusion applies to any folder encountered during traversal
         if any(norm_current_folder.startswith(excluded_path) for excluded_path in excluded_norm_paths):
             continue
 
-        # Apply time filter (if enabled)
-        if enable_time_filter and creation_cache_manager:
+        # Apply time filter ONLY if it's a subfolder AND time filter is enabled
+        # The root_folder (current_folder == root_folder) is always traversed to find its children,
+        # but its own creation time doesn't affect its subfolders' inclusion.
+        # Only actual subfolders that are candidates for image extraction will be added to all_subfolders_to_return.
+        if current_folder != root_folder and enable_time_filter and creation_cache_manager:
             folder_ctime_timestamp = creation_cache_manager.get_creation_time(current_folder)
             if folder_ctime_timestamp is not None:
-                folder_ctime = datetime.datetime.fromtimestamp(folder_ctime_timestamp) # Corrected to datetime.datetime.fromtimestamp
+                folder_ctime = datetime.datetime.fromtimestamp(folder_ctime_timestamp)
                 # Set end_date to end of the day to include that date
                 if (start_date and folder_ctime < start_date) or \
                    (end_date and folder_ctime > end_date.replace(hour=23, minute=59, second=59, microsecond=999999)):
                     continue # Not within time range, skip this folder and its subfolders
             else:
-                log_error(f"無法獲取資料夾建立時間，跳過時間篩選: {current_folder}", include_traceback=False) # Added include_traceback=False
-                # If time cannot be retrieved and time filter is enabled, this folder will be skipped
-                continue
+                log_error(f"無法獲取資料夾建立時間，跳過時間篩選: {current_folder}", include_traceback=False)
+                continue # If time cannot be retrieved and time filter is enabled, this folder will be skipped
 
-        all_subfolders.append(current_folder) # Add matching folder to list
+        # If it's a subfolder (not the root_folder itself) and passed all filters, add it to the final list.
+        # The root_folder itself is used for traversal, but not included in the result list based on user's need
+        # to scan "E-Download以下所有符合時間的子資料夾".
+        if current_folder != root_folder:
+            all_subfolders_to_return.append(current_folder)
 
         try:
             # Iterate through direct subfolders of the current folder
             for entry in os.listdir(current_folder):
                 entry_path = os.path.join(current_folder, entry)
                 if os.path.isdir(entry_path):
-                    # No need to check excluded name again here, as full path has been checked outside
-                    folders_to_process.append(entry_path)
+                    # Add to queue for further processing
+                    folders_to_process_queue.append(entry_path)
         except PermissionError:
-            log_error(f"無權限訪問資料夾: {current_folder}", include_traceback=False) # Added include_traceback=False
+            log_error(f"無權限訪問資料夾: {current_folder}", include_traceback=False)
         except Exception as e:
             log_error(f"遍歷資料夾 '{current_folder}' 時發生錯誤: {e}", include_traceback=True)
             
-    return all_subfolders
+    return all_subfolders_to_return
 
 def extract_last_n_files_from_folders(folder_paths, count):
     """
@@ -1671,7 +1686,7 @@ def main():
         except Exception as e:
             log_error(f"設置多進程啟動方法時發生錯誤: {e}", include_traceback=True)
 
-    print("=== E-Download 漫畫尾頁廣告剔除 v11.0v5 - 啟動中 ===", flush=True) # Changed version to 11.0v5
+    print("=== E-Download 漫畫尾頁廣告剔除 v11.0v6 - 啟動中 ===", flush=True) # Changed version to 11.0v6
     check_and_install_packages()
     print("套件檢查完成。", flush=True)
     
