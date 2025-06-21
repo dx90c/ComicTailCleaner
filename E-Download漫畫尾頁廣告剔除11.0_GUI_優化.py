@@ -2,7 +2,7 @@
 
 # ======================================================================
 # 檔案名稱：E-Download漫畫尾頁廣告剔除11.0_GUI_優化.py
-# 版本號：11.0v3
+# 版本號：11.0v4
 #
 # === 程式說明 ===
 # 這是一個專為清理 E-Download 資料夾中漫畫檔案尾頁廣告的工具。
@@ -10,10 +10,12 @@
 # 適用於處理大量漫畫檔案，節省手動篩選時間。
 # 支援三種比對模式：廣告比對、互相比對和 QR Code 檢測。
 #
-# === 11.0v3 版本更新內容 ===
+# === 11.0v4 版本更新內容 ===
+# - **功能調整**: 將「開啟所有選中資料夾」功能修改為「開啟選中資料夾」。
+#   現在只會開啟列表中第一個被反白選中（滑鼠選中）的圖片所在的資料夾，避免同時開啟過多視窗。
+# - **版本號更新**: 將版本號從 `11.0v3` 更新為 `11.0v4`。
 # - **修正錯誤**: 修正了「打開資料夾」功能在某些情況下錯誤地開啟「我的文件」資料夾的問題。
 #   現在使用更穩健的 `start` 命令透過 shell 開啟資料夾，以確保路徑正確解析。
-# - **版本號更新**: 將版本號從 `11.0v2` 更新為 `11.0v3`。
 # - **基礎版本**: 此版本基於 "1140614谷歌版-可用版-只有調整排序.PY" 進行組織與命名更新。
 # - **功能強化**: 正式啟用並實作資料夾「建立時間」篩選功能。
 # - **性能優化**: 引入資料夾建立時間快取機制 (JSON 檔案)，大幅提升後續掃描效率。
@@ -1321,7 +1323,8 @@ class MainWindow:
         ttk.Button(button_frame, text="反選", command=self._invert_selection).pack(side=tk.LEFT, padx=5, pady=5)
         ttk.Button(button_frame, text="刪除選中", command=self._delete_selected_from_disk).pack(side=tk.LEFT, padx=5, pady=5)
         ttk.Button(button_frame, text="撤銷刪除 (Ctrl+Z)", command=self._undo_delete_gui).pack(side=tk.LEFT, padx=5, pady=5)
-        ttk.Button(button_frame, text="開啟所有選中資料夾", command=self._open_selected_folders).pack(side=tk.LEFT, padx=5, pady=5)
+        # Modified button text and command to open only the currently selected folder
+        ttk.Button(button_frame, text="開啟選中資料夾", command=self._open_selected_folder_single).pack(side=tk.LEFT, padx=5, pady=5)
         ttk.Button(button_frame, text="關閉", command=self._on_closing).pack(side=tk.RIGHT, padx=5, pady=5)
 
     def _populate_listbox(self):
@@ -1364,7 +1367,10 @@ class MainWindow:
         if column_id == "#1":
             self._toggle_selection_by_item_id(item_id)
         elif column_id == "#2" or column_id == "#3":
-            self._toggle_selection_by_item_id(item_id)
+            self.tree.selection_set(item_id) # Ensure this item is selected for preview
+            self.tree.focus(item_id)
+            self._on_item_select(None) # Force update preview
+            self._toggle_selection_by_item_id(item_id) # Then toggle checkbox
         elif column_id == "#5":
             original_path = self.tree.item(item_id, "tags")[0]
             if original_path and os.path.exists(original_path):
@@ -1373,8 +1379,10 @@ class MainWindow:
             else:
                 messagebox.showwarning("路徑無效", f"檔案路徑不存在或無效:\n{original_path}")
         else:
+            # Default selection behavior for other clicks
             self.tree.selection_set(item_id)
             self.tree.focus(item_id)
+            self._on_item_select(None) # Ensure preview updates on selection
 
     def _on_item_select(self, event):
         """Handles item selection in Treeview."""
@@ -1591,20 +1599,22 @@ class MainWindow:
             log_error(f"開啟資料夾失敗 {folder_path}: {e}", include_traceback=True)
             messagebox.showerror("開啟失敗", f"無法開啟資料夾: {folder_path}\n錯誤: {e}")
 
-    def _open_selected_folders(self):
-        """Opens folders of all selected images."""
-        if not self.selected_files:
-            messagebox.showinfo("提示", "沒有選中的圖片以開啟資料夾。")
+    def _open_selected_folder_single(self):
+        """Opens the folder of the single currently selected (highlighted) image."""
+        selected_items = self.tree.selection()
+        if not selected_items:
+            messagebox.showinfo("提示", "請先在列表中選中一個圖片。")
             return
-        folders_to_open = set()
-        for file_path in self.selected_files:
-            folders_to_open.add(os.path.dirname(file_path))
-        if not folders_to_open:
-            messagebox.showinfo("提示", "沒有可開啟的資料夾。")
-            return
-        for folder_path in folders_to_open:
+        
+        # Take the first selected item only
+        item_id = selected_items[0]
+        path1, _, _ = self.tree.item(item_id, "tags")
+        
+        if path1 and os.path.exists(path1):
+            folder_path = os.path.dirname(path1)
             self._open_folder(folder_path)
-        messagebox.showinfo("操作完成", f"已嘗試開啟 {len(folders_to_open)} 個選中圖片的資料夾。")
+        else:
+            messagebox.showwarning("路徑無效", f"選中的圖片文件路徑不存在或無效:\n{path1}")
 
     def _on_closing(self):
         """Handles closing the main window."""
@@ -1649,7 +1659,7 @@ def main():
         except Exception as e:
             log_error(f"設置多進程啟動方法時發生錯誤: {e}", include_traceback=True)
 
-    print("=== E-Download 漫畫尾頁廣告剔除 v11.0v3 - 啟動中 ===", flush=True) # Changed version to 11.0v3
+    print("=== E-Download 漫畫尾頁廣告剔除 v11.0v4 - 啟動中 ===", flush=True) # Changed version to 11.0v4
     check_and_install_packages()
     print("套件檢查完成。", flush=True)
     
