@@ -1,6 +1,6 @@
 # ======================================================================
 # 檔案名稱：E-Download漫畫尾頁廣告剔除11.0_GUI_優化.py
-# 版本號：11.0v12
+# 版本號：11.0v7
 #
 # === 程式說明 ===
 # 這是一個專為清理 E-Download 資料夾中漫畫檔案尾頁廣告的工具。
@@ -8,27 +8,28 @@
 # 適用於處理大量漫畫檔案，節省手動篩選時間。
 # 支援三種比對模式：廣告比對、互相比對和 QR Code 檢測。
 #
-# === 11.0v12 版本更新內容 (本次針對上一次提交後的回報進行修正) ===
+# === 11.0v7 版本更新內容 ===
+# - **版本號更新**: 將程式版本號從 `11.0v6` 更新為 `11.0v7`。
+# - **滑動條步進與顯示優化**:
+#   - 移除 `ttk.Scale` 中不兼容的 `-resolution` 選項，解決 `TclError` 錯誤。
+#   - 修正設定介面與結果顯示介面中的相似度閾值滑動條，使其數值顯示強制四捨五入到整數百分比，
+#     達到視覺上 1% 步進的效果，而非小數點移動。同時，篩選邏輯也將基於四捨五入後的整數值。
+# - **列表方向鍵導航修正**:
+#   - 修正 `MainWindow` 中圖片列表使用方向鍵（上下箭頭）導航時，一次移動兩格的問題。
+#     現在每次按鍵只會移動到上一個或下一個單一項目，並透過事件中斷機制防止重複觸發。
+# - **GUI 佈局健壯性強化**:
+#   - 徹底解決了 `MainWindow` 初始化時因 `grid_row_configure`
+#     和 `grid_column_configure` 導致的 `AttributeError` 錯誤。現在 `MainWindow`
+#     及其子框架內所有元件的佈局都統一使用 `pack` 佈局管理器，
+#     或僅在 Tkinter 根視窗上應用 `grid` 佈局管理器，避免了潛在的屬性衝突。
 # - **修正 `NameError`**: 在 `load_ad_hashes` 函數中，將 `AD_HASH_FILE` 修正為
-#   正確的全局常量 `AD_HASH_CACHE_FILE`，解決了 `NameError: name 'AD_HASH_FILE' is not defined`。
-# - **修正 `AttributeError` (嘗試解決方案)**: 調整 `SettingsGUI` 類中 `enable_extract_count_checkbox` 的命名。
-#   將 `self.enable_extract_count_checkbox` 變數重新命名為 `self.chk_enable_extract_count`。
-#   此修改旨在排除任何潛在的命名衝突或不明原因的屬性賦值失敗問題。
-# - **修正 `AttributeError` (最終解決方案)**: 調整 `MainWindow._create_widgets` 中的佈局邏輯。
-#   現在主視窗 (即 `self.root`, Tkinter 的根視窗) 的頂層佈局不再使用 `grid_row_configure` 和 `grid_column_configure`。
-#   而是直接使用 `pack` 佈局管理器來放置主要的 `Panedwindow` 和底部的按鈕容器。
-#   此外，`Panedwindow` 內部的 `left_frame` 和 `right_frame` 的直接子元件，
-#   以及 `target_image_frame` 和 `compare_image_frame` 內部的子元件，
-#   也都改為使用 `pack` 佈局。這次的修正特別針對 `filter_frame` 內部的元件，
-#   將其從 `grid` 佈局轉換為 `pack` 佈局，徹底避免對 `ttk.Frame` 或 `ttk.LabelFrame`
-#   物件本身呼叫 `grid_row_configure` 或 `grid_column_configure`，
-#   從而繞開 Tkinter 在某些特定環境下可能出現的屬性錯誤，確保介面能夠更穩定地初始化。
-# - **版本號維持**: 此次修正不增加版本號，維持在 `11.0v12`。
-# - **移除診斷性打印**: 移除了 `MainWindow._create_widgets` 方法中之前為了診斷目的而加入的 `DEBUG` 打印語句。
-# - **修復 GUI 佈局錯誤**: 修正了 `MainWindow` 中 `grid_row_configure`
-#   導致的 `AttributeError` 錯誤。現在主視窗的佈局直接在 `tk.Tk()` 根視窗上
-#   應用 `grid` 佈局管理器，移除了中間的 `main_content_frame`，確保佈局的健壯性。
-# - **相似度閾值動態調整**: 在結果顯示介面 (MainWindow) 中加入一個滑塊和數值顯示，
+#   正確的全局常量 `AD_HASH_CACHE_FILE`，解決了 `NameError: name 'AD_HASH_FILE' is not定義`。
+# - **修正 `AttributeError` (SettingsGUI)**: 調整 `SettingsGUI` 類中
+#   `self.enable_extract_count_checkbox` 變數名稱為 `self.chk_enable_extract_count`，
+#   以排除潛在的命名衝突或屬性賦值問題。
+# - **新增圖片抽取數量限制開關**: 在設定介面中增加一個選項，允許使用者選擇是「提取末尾 N 張圖片」
+#   還是「掃描資料夾內所有圖片」，提供更靈活的掃描控制。
+# - **相似度閾值動態調整**: 在結果顯示介面 (`MainWindow`) 中加入一個滑塊和數值顯示，
 #   讓使用者可以直接調整相似度閾值，並即時篩選顯示的結果，無需重新運行掃描。
 # - **修正時間篩選邏輯**: 調整 `get_all_subfolders` 函數，確保時間篩選只應用於
 #   `root_scan_folder` (根掃描資料夾) 下的子資料夾，而不是根資料夾本身。
@@ -36,13 +37,11 @@
 # - **哈希演算法優化**: 將圖片感知哈希比對演算法從 `average_hash` (ahash)
 #   更新為 `perceptual_hash` (phash)，以增加圖片相似度比對的準確度。
 # - **快取優化**: 掃描圖片哈希快取檔案 (`scanned_hashes_cache.json`) 現在會根據
-#   「根掃描資料夾」的路徑動態生成一個專屬的檔案名稱。
-#   例如：`scanned_hashes_cache_{根掃描資料夾路徑的SHA256哈希值}.json`。
-#   這確保了每個不同根掃描資料夾的快取相互獨立，避免數據混淆。
+#   「根掃描資料夾」的路徑動態生成一個專屬的檔案名稱，確保每個不同根掃描資料夾的快取相互獨立。
 # - **功能調整**: 將「開啟所有選中資料夾」功能修改為「開啟選中資料夾」。
-#   現在只會開啟列表中第一個被反白選中（滑鼠選中）的圖片所在的資料夾，避免同時開啟過多視窗。
-# - **修正錯誤**: 修正了「打開資料夾」功能在某些情況下錯誤地開啟「我的文件」資料夾的問題。
-#   現在使用更穩健的 `start` 命令透過 shell 開啟資料夾，以確保路徑正確解析。
+#   現在只會開啟列表中第一個被反白選中（滑鼠選中）的圖片所在的資料夾。
+# - **修正錯誤**: 修正了「打開資料夾」功能在某些情況下錯誤地開啟「我的文件」資料夾的問題，
+#   現在使用更穩健的 `start` 命令透過 shell 開啟資料夾。
 # - **基礎版本**: 此版本基於 "1140614谷歌版-可用版-只有調整排序.PY" 進行組織與命名更新。
 # - **功能強化**: 正式啟用並實作資料夾「建立時間」篩選功能。
 # - **性能優化**: 引入資料夾建立時間快取機制 (JSON 檔案)，大幅提升後續掃描效率。
@@ -50,7 +49,7 @@
 # - **核心邏輯實作**: 將 ImageComparisonEngine 中的圖片哈希計算、相似度比對和 QR Code 偵測邏輯從模擬替換為實際功能。
 # - **新增掃描圖片哈希快取**: 實作了掃描圖片的哈希快取功能，包括讀取、寫入、增量更新和強制重建，進一步提升效率。
 # - **錯誤修復 (閃退問題)**: 修正 `extract_last_n_files_from_folders` 函數中 `log_error` 呼叫的語法錯誤，
-#   並增強 `log_error` 函數的寫入即時性，以更好地捕捉早期錯誤。
+#   並增強 `log_error` 函數的寫入即時性。
 #
 # === 導入必要套件 ===
 # 1. Pillow (PIL): 圖片處理庫
@@ -647,6 +646,9 @@ def calculate_image_hash(image_path, hash_size=8):
     except UnidentifiedImageError:
         log_error(f"哈希計算失敗: 無法識別圖片格式或文件已損壞 - {image_path}", include_traceback=False)
         return None
+    except OSError as e:
+            log_error(f"打開圖片檔案時發生操作系統錯誤 '{image_path}': {e}", include_traceback=False)
+            return None
     except Exception as e:
         log_error(f"計算圖片哈希時發生錯誤: {image_path}, 錯誤: {e}", include_traceback=True)
         return None
@@ -792,7 +794,7 @@ class ImageComparisonEngine:
             log_error(error_message, include_traceback=True)
             # Try to show a messagebox, but also print for immediate console visibility
             print(f"\n!!!! 多進程錯誤 !!!! {error_message}", flush=True)
-            messagebox.showerror("程式錯誤 - 多進程", f"多進程計算過程中發生錯誤，程式將關閉。\n錯誤: {e}\n請查看 'error_log.txt'。")
+            messagebox.showerror("程式錯誤 - 多進程", f"多進程計算過程中發生錯誤，程式將關閉。\n錯誤: {e}\n請查看 'error_log.txt'。", parent=self.root) # Added parent for messagebox
             sys.exit(1) # Exit immediately if multiprocessing fails critically
 
         # Step 3: Save cache after all multiprocessing tasks are complete
@@ -1017,6 +1019,7 @@ class SettingsGUI:
 
         ttk.Label(basic_settings_frame, text="相似度閾值 (%):").grid(row=2, column=0, sticky="w", pady=2) # Shifted row index
         self.similarity_threshold_var = tk.DoubleVar()
+        # 移除 resolution=1.0
         ttk.Scale(basic_settings_frame, from_=50, to=100, orient="horizontal",
                   variable=self.similarity_threshold_var, length=200,
                   command=self._update_threshold_label).grid(row=2, column=1, sticky="w", padx=5) # Shifted row index
@@ -1167,7 +1170,8 @@ class SettingsGUI:
 
     def _update_threshold_label(self, val):
         """Updates the similarity threshold label."""
-        self.threshold_label.config(text=f"{float(val):.1f}%")
+        # 使用 round 函數確保顯示的值是整數，因為 resolution 設為 1.0
+        self.threshold_label.config(text=f"{round(float(val)):d}%") 
 
     def _validate_date(self, date_str):
         """Validates date string format (YYYY-MM-DD)."""
@@ -1307,7 +1311,7 @@ class MainWindow:
 
             self._create_widgets()
             self._populate_listbox() # This will now filter based on initial threshold
-            self._bind_keys()
+            self._bind_keys() # Re-enabled and modified for single-step navigation
             
             self.root.update_idletasks()
 
@@ -1406,10 +1410,10 @@ class MainWindow:
         # New: Similarity Filter Section
         filter_frame = ttk.LabelFrame(bottom_button_container, text="相似度篩選", padding="10")
         filter_frame.pack(fill=tk.X, expand=True, padx=5, pady=5) 
-        # Removed grid_column_configure for filter_frame, will use pack for its children
         
         # Changed from grid to pack for children within filter_frame
         ttk.Label(filter_frame, text="最小相似度 (%):").pack(side=tk.LEFT, pady=2)
+        # 移除 resolution=1.0
         ttk.Scale(filter_frame, from_=50, to=100, orient="horizontal",
                   variable=self.current_display_threshold, length=200,
                   command=self._update_display_threshold).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
@@ -1423,7 +1427,8 @@ class MainWindow:
     def _update_display_threshold(self, *args):
         """Callback for the similarity threshold slider."""
         current_val = self.current_display_threshold.get()
-        self.display_threshold_label.config(text=f"{current_val:.1f}%")
+        # 使用 round 函數確保顯示的值是整數，因為 resolution 設為 1.0
+        self.display_threshold_label.config(text=f"{round(current_val):d}%")
         self._populate_listbox() # Re-populate the listbox with the new filter
 
     def _populate_listbox(self):
@@ -1432,7 +1437,8 @@ class MainWindow:
             self.tree.delete(iid)
         self.selected_files.clear() # Clear selections when repopulating
 
-        current_threshold = self.current_display_threshold.get()
+        # 將閾值四捨五入到整數，確保篩選邏輯符合 1% 步進
+        current_threshold = round(self.current_display_threshold.get()) 
         self.displayed_similar_files = [] # Reset displayed list
 
         for path1, path2, similarity in self.all_similar_files:
@@ -1562,27 +1568,42 @@ class MainWindow:
 
     def _bind_keys(self):
         """Binds keyboard navigation keys."""
-        self.root.bind("<Up>", self._navigate_image)
-        self.root.bind("<Down>", self._navigate_image)
+        # 重新綁定上下方向鍵，並確保只移動一格
+        self.tree.bind("<Up>", self._navigate_image)
+        self.tree.bind("<Down>", self._navigate_image)
 
     def _navigate_image(self, event):
         """Navigates through the image list using arrow keys."""
         current_selection = self.tree.selection()
         if not current_selection:
-            return
+            return "break" # Break if no selection
+
         current_item = current_selection[0]
+        
         if event.keysym == "Up":
             prev_item = self.tree.prev(current_item)
             if prev_item:
                 self.tree.selection_set(prev_item)
                 self.tree.focus(prev_item)
                 self.tree.see(prev_item)
+            else: # If at the first item, keep selection on first item
+                self.tree.selection_set(current_item)
+                self.tree.focus(current_item)
+                self.tree.see(current_item)
         elif event.keysym == "Down":
             next_item = self.tree.next(current_item)
             if next_item:
                 self.tree.selection_set(next_item)
                 self.tree.focus(next_item)
                 self.tree.see(next_item)
+            else: # If at the last item, keep selection on last item
+                self.tree.selection_set(current_item)
+                self.tree.focus(current_item)
+                self.tree.see(current_item)
+        
+        # 關鍵：返回 "break" 以阻止事件進一步傳播，避免 Tkinter 默認行為的額外移動
+        return "break" 
+
 
     def _toggle_selection_by_item_id(self, item_id):
         """Toggles selection for a given item ID."""
@@ -1778,7 +1799,7 @@ def main():
         except Exception as e:
             log_error(f"設置多進程啟動方法時發生錯誤: {e}", include_traceback=True)
 
-    print("=== E-Download 漫畫尾頁廣告剔除 v11.0v12 - 啟動中 ===", flush=True) # Changed version to 11.0v12
+    print("=== E-Download 漫畫尾頁廣告剔除 v11.0v7 - 啟動中 ===", flush=True) # Changed version to 11.0v7
     check_and_install_packages()
     print("套件檢查完成。", flush=True)
     
