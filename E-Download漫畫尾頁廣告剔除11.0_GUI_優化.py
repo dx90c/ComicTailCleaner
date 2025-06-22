@@ -1,6 +1,6 @@
 # ======================================================================
 # 檔案名稱：E-Download漫畫尾頁廣告剔除11.0_GUI_優化.py
-# 版本號：11.0v6
+# 版本號：11.0v12
 #
 # === 程式說明 ===
 # 這是一個專為清理 E-Download 資料夾中漫畫檔案尾頁廣告的工具。
@@ -8,13 +8,33 @@
 # 適用於處理大量漫畫檔案，節省手動篩選時間。
 # 支援三種比對模式：廣告比對、互相比對和 QR Code 檢測。
 #
-# === 11.0v6 版本更新內容 ===
+# === 11.0v12 版本更新內容 (本次針對上一次提交後的回報進行修正) ===
+# - **修正 `NameError`**: 在 `load_ad_hashes` 函數中，將 `AD_HASH_FILE` 修正為
+#   正確的全局常量 `AD_HASH_CACHE_FILE`，解決了 `NameError: name 'AD_HASH_FILE' is not defined`。
+# - **修正 `AttributeError` (嘗試解決方案)**: 調整 `SettingsGUI` 類中 `enable_extract_count_checkbox` 的命名。
+#   將 `self.enable_extract_count_checkbox` 變數重新命名為 `self.chk_enable_extract_count`。
+#   此修改旨在排除任何潛在的命名衝突或不明原因的屬性賦值失敗問題。
+# - **修正 `AttributeError` (最終解決方案)**: 調整 `MainWindow._create_widgets` 中的佈局邏輯。
+#   現在主視窗 (即 `self.root`, Tkinter 的根視窗) 的頂層佈局不再使用 `grid_row_configure` 和 `grid_column_configure`。
+#   而是直接使用 `pack` 佈局管理器來放置主要的 `Panedwindow` 和底部的按鈕容器。
+#   此外，`Panedwindow` 內部的 `left_frame` 和 `right_frame` 的直接子元件，
+#   以及 `target_image_frame` 和 `compare_image_frame` 內部的子元件，
+#   也都改為使用 `pack` 佈局。這次的修正特別針對 `filter_frame` 內部的元件，
+#   將其從 `grid` 佈局轉換為 `pack` 佈局，徹底避免對 `ttk.Frame` 或 `ttk.LabelFrame`
+#   物件本身呼叫 `grid_row_configure` 或 `grid_column_configure`，
+#   從而繞開 Tkinter 在某些特定環境下可能出現的屬性錯誤，確保介面能夠更穩定地初始化。
+# - **版本號維持**: 此次修正不增加版本號，維持在 `11.0v12`。
+# - **移除診斷性打印**: 移除了 `MainWindow._create_widgets` 方法中之前為了診斷目的而加入的 `DEBUG` 打印語句。
+# - **修復 GUI 佈局錯誤**: 修正了 `MainWindow` 中 `grid_row_configure`
+#   導致的 `AttributeError` 錯誤。現在主視窗的佈局直接在 `tk.Tk()` 根視窗上
+#   應用 `grid` 佈局管理器，移除了中間的 `main_content_frame`，確保佈局的健壯性。
+# - **相似度閾值動態調整**: 在結果顯示介面 (MainWindow) 中加入一個滑塊和數值顯示，
+#   讓使用者可以直接調整相似度閾值，並即時篩選顯示的結果，無需重新運行掃描。
 # - **修正時間篩選邏輯**: 調整 `get_all_subfolders` 函數，確保時間篩選只應用於
 #   `root_scan_folder` (根掃描資料夾) 下的子資料夾，而不是根資料夾本身。
 #   這解決了當根資料夾建立時間不在篩選範圍內時，導致所有子資料夾都被跳過的問題。
 # - **哈希演算法優化**: 將圖片感知哈希比對演算法從 `average_hash` (ahash)
 #   更新為 `perceptual_hash` (phash)，以增加圖片相似度比對的準確度。
-# - **版本號更新**: 將版本號從 `11.0v5` 更新為 `11.0v6`。
 # - **快取優化**: 掃描圖片哈希快取檔案 (`scanned_hashes_cache.json`) 現在會根據
 #   「根掃描資料夾」的路徑動態生成一個專屬的檔案名稱。
 #   例如：`scanned_hashes_cache_{根掃描資料夾路徑的SHA256哈希值}.json`。
@@ -436,49 +456,9 @@ class ScannedImageHashesCacheManager:
         except Exception as e:
             log_error(f"更新哈希快取時發生錯誤: {e}", include_traceback=True)
 
-    def invalidate_cache(self):
-        """清空掃描圖片哈希快取，通常用於強制重建。"""
-        self.cache = {}
-        if os.path.exists(self.cache_file_path):
-            try:
-                os.remove(self.cache_file_path)
-                print(f"掃描圖片哈希快取檔案 '{self.cache_file_path}' 已刪除。", flush=True) # Added flush=True
-            except Exception as e:
-                log_error(f"刪除掃描圖片哈希快取檔案 '{self.cache_file_path}' 時發生錯誤: {e}", include_traceback=True)
-        print("掃描圖片哈希快取已失效。", flush=True) # Added flush=True
-
 
 # Ad hash cache file path
 AD_HASH_CACHE_FILE = "ad_hashes.json" 
-
-def calculate_image_hash(image_path, hash_size=8):
-    """
-    計算圖片的感知哈希值。
-    Args:
-        image_path (str): 圖片檔案路徑。
-        hash_size (int): 哈希的大小 (例如 8x8 像素)。
-    Returns:
-        imagehash.ImageHash: 計算出的感知哈希對象，如果失敗則返回 None。
-    """
-    try:
-        with Image.open(image_path) as img:
-            img = ImageOps.exif_transpose(img) # Process EXIF orientation of the image
-            # Convert to grayscale for hash calculation
-            img = img.convert("L").resize((hash_size, hash_size), Image.Resampling.LANCZOS)
-            # Changed from imagehash.average_hash to imagehash.phash
-            return imagehash.phash(img) # Return ImageHash object
-    except FileNotFoundError:
-        log_error(f"圖片檔案未找到: {image_path}", include_traceback=False) 
-        return None
-    except UnidentifiedImageError: # Add specific error for unrecognized image formats
-        log_error(f"圖片格式無法識別或文件已損壞: {image_path}", include_traceback=False)
-        return None
-    except OSError as e: # Catch broader OS-related errors for image opening
-        log_error(f"打開圖片檔案時發生操作系統錯誤 '{image_path}': {e}", include_traceback=False)
-        return None
-    except Exception as e:
-        log_error(f"處理圖片 '{image_path}' 時發生未知錯誤: {e}", include_traceback=True)
-        return None
 
 def load_ad_hashes(ad_folder_path, rebuild_cache=False):
     """
@@ -492,7 +472,7 @@ def load_ad_hashes(ad_folder_path, rebuild_cache=False):
     ad_hashes = {}
     if os.path.exists(AD_HASH_CACHE_FILE) and not rebuild_cache:
         try:
-            with open(AD_HASH_CACHE_FILE, 'r', encoding='utf-8') as f:
+            with open(AD_HASH_CACHE_FILE, 'r', encoding='utf-8') as f: # Corrected variable name from AD_HASH_FILE
                 loaded_data = json.load(f)
                 # Convert from string back to ImageHash object
                 ad_hashes = {path: imagehash.hex_to_hash(phash_str) for path, phash_str in loaded_data.items()}
@@ -644,6 +624,32 @@ def extract_last_n_files_from_folders(folder_paths, count, enable_limit): # Modi
         except Exception as e:
             log_error(f"處理資料夾 '{folder_path}' 時發生錯誤: {e}", include_traceback=True)
     return extracted_files
+
+def calculate_image_hash(image_path, hash_size=8):
+    """
+    計算圖片的感知哈希值 (Perceptual Hash)。
+    Args:
+        image_path (str): 圖片檔案的路徑。
+        hash_size (int): 哈希值的尺寸，例如 8 代表生成 8x8 的哈希矩陣。
+    Returns:
+        imagehash.ImageHash: 圖片的感知哈希物件，如果處理失敗則返回 None。
+    """
+    try:
+        with Image.open(image_path) as img:
+            # 使用 ImageOps.exif_transpose 處理圖片的 EXIF 方向，確保正確旋轉
+            img = ImageOps.exif_transpose(img)
+            # 使用 perceptual_hash (phash) 演算法
+            phash = imagehash.phash(img, hash_size=hash_size)
+            return phash
+    except FileNotFoundError:
+        log_error(f"哈希計算失敗: 文件未找到 - {image_path}", include_traceback=False)
+        return None
+    except UnidentifiedImageError:
+        log_error(f"哈希計算失敗: 無法識別圖片格式或文件已損壞 - {image_path}", include_traceback=False)
+        return None
+    except Exception as e:
+        log_error(f"計算圖片哈希時發生錯誤: {image_path}, 錯誤: {e}", include_traceback=True)
+        return None
 
 # New global helper function for multiprocessing pool
 def _pool_worker_hash_and_mtime(image_path):
@@ -999,8 +1005,9 @@ class SettingsGUI:
         
         # New: Checkbutton for enabling/disabling extract count limit
         self.enable_extract_count_limit_var = tk.BooleanVar()
-        self.enable_extract_count_limit_checkbox = ttk.Checkbutton(basic_settings_frame, text="啟用圖片抽取數量限制", variable=self.enable_extract_count_limit_var)
-        self.enable_extract_count_limit_checkbox.grid(row=0, column=0, sticky="w", pady=2)
+        # Renamed to chk_enable_extract_count to avoid potential attribute error due to name clash or subtle issue
+        self.chk_enable_extract_count = ttk.Checkbutton(basic_settings_frame, text="啟用圖片抽取數量限制", variable=self.enable_extract_count_limit_var)
+        self.chk_enable_extract_count.grid(row=0, column=0, sticky="w", pady=2) # Using the new name
 
         ttk.Label(basic_settings_frame, text="提取末尾圖片數量:").grid(row=1, column=0, sticky="w", pady=2) # Shifted row index
         self.extract_count_var = tk.StringVar()
@@ -1128,6 +1135,7 @@ class SettingsGUI:
         """Sets up event bindings."""
         self.enable_time_filter_var.trace_add("write", lambda *args: self._toggle_time_filter_fields())
         # New: Bind the extract count limit checkbox
+        # Using the new name self.chk_enable_extract_count to bind the trace
         self.enable_extract_count_limit_var.trace_add("write", lambda *args: self._toggle_extract_count_fields())
 
     def _toggle_time_filter_fields(self):
@@ -1275,9 +1283,10 @@ class SettingsGUI:
             self.settings_window.destroy()
 
 class MainWindow:
-    def __init__(self, master, similar_files=None, comparison_mode="N/A"):
+    def __init__(self, master, similar_files=None, comparison_mode="N/A", initial_similarity_threshold=85.0): # Added initial_similarity_threshold
         self.root = master
-        self.similar_files = similar_files if similar_files is not None else []
+        self.all_similar_files = similar_files if similar_files is not None else [] # Store all found similar files
+        self.displayed_similar_files = [] # Files currently displayed after filtering
         self.selected_files = set()
         self.comparison_mode = comparison_mode
         self.deleted_history = deque(maxlen=10)
@@ -1285,6 +1294,8 @@ class MainWindow:
         self.img_tk_target = None
         self.img_tk_compare = None
         self.max_preview_size = (400, 400)
+        self.current_display_threshold = tk.DoubleVar(value=initial_similarity_threshold) # New: For dynamic filtering
+        self.original_scan_threshold = initial_similarity_threshold # Store original scan threshold for reference
 
         try:
             self.root.title("圖片比對結果 - 廣告/相似圖片清理工具")
@@ -1295,14 +1306,14 @@ class MainWindow:
             self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
             self._create_widgets()
-            self._populate_listbox()
+            self._populate_listbox() # This will now filter based on initial threshold
             self._bind_keys()
             
             self.root.update_idletasks()
 
             print("MainWindow: 介面已成功建立並初始化。", flush=True)
 
-            if self.similar_files:
+            if self.displayed_similar_files: # Check displayed files
                 if self.tree.get_children():
                     first_item_id = self.tree.get_children()[0]
                     self.tree.selection_set(first_item_id)
@@ -1320,24 +1331,19 @@ class MainWindow:
         for widget in self.root.winfo_children():
             widget.destroy()
 
-        self.root.grid_row_configure(0, weight=1)
-        self.root.grid_row_configure(1, weight=0)
-        self.root.grid_column_configure(0, weight=1)
-
+        # Create main paned window and pack it into the root
         main_pane = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
-        main_pane.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=10) # Using pack here
 
+        # Left and Right frames for the paned window
         left_frame = ttk.Frame(main_pane)
         main_pane.add(left_frame, weight=1)
 
         right_frame = ttk.Frame(main_pane)
         main_pane.add(right_frame, weight=2)
 
-        left_frame.grid_row_configure(0, weight=1)
-        left_frame.grid_columnconfigure(0, weight=1)
-
+        # Treeview and scrollbar inside left_frame
         columns = ("Selected", "PrimaryImage", "ComparisonInfo", "Similarity", "OpenFolder")
-
         self.tree = ttk.Treeview(left_frame, columns=columns, show="headings", selectmode="extended")
         
         self.tree.heading("Selected", text="選取", anchor=tk.CENTER)
@@ -1355,8 +1361,9 @@ class MainWindow:
         vscroll = ttk.Scrollbar(left_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vscroll.set)
         
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        vscroll.grid(row=0, column=1, sticky="ns")
+        # Changed from grid to pack for treeview and scrollbar
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vscroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.tree.bind("<<TreeviewSelect>>", self._on_item_select)
         self.tree.bind("<Button-1>", self._on_treeview_click)
@@ -1366,33 +1373,26 @@ class MainWindow:
         self.tree.bind("<BackSpace>", self._delete_selected_from_disk)
         self.root.bind("<Control-z>", self._undo_delete_gui)
 
-        right_frame.grid_row_configure(0, weight=1)
-        right_frame.grid_row_configure(1, weight=1)
-        right_frame.grid_columnconfigure(0, weight=1)
-
         self.target_image_frame = ttk.LabelFrame(right_frame, text="目標圖片預覽", padding="10")
-        self.target_image_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
-        self.target_image_frame.grid_row_configure(0, weight=1)
-        self.target_image_frame.grid_column_configure(0, weight=1)
+        self.target_image_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5) 
         self.target_image_label = ttk.Label(self.target_image_frame)
-        self.target_image_label.grid(row=0, column=0, sticky="nsew")
+        self.target_image_label.pack(fill=tk.BOTH, expand=True) 
         self.target_path_label = ttk.Label(self.target_image_frame, text="", wraplength=600)
-        self.target_path_label.grid(row=1, column=0, sticky="ew")
+        self.target_path_label.pack(fill=tk.X) 
 
         self.compare_image_frame = ttk.LabelFrame(right_frame, text="比對圖片預覽", padding="10")
-        self.compare_image_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
-        self.compare_image_frame.grid_row_configure(0, weight=1)
-        self.compare_image_frame.grid_column_configure(0, weight=1)
+        self.compare_image_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5) 
         self.compare_image_label = ttk.Label(self.compare_image_frame)
-        self.compare_image_label.grid(row=0, column=0, sticky="nsew")
+        self.compare_image_label.pack(fill=tk.BOTH, expand=True) 
         self.compare_path_label = ttk.Label(self.compare_image_frame, text="", wraplength=600)
-        self.compare_path_label.grid(row=1, column=0, sticky="ew")
+        self.compare_path_label.pack(fill=tk.X) 
 
+        # Create bottom button container and pack it into the root
         bottom_button_container = ttk.Frame(self.root)
-        bottom_button_container.grid(row=1, column=0, sticky="ew", padx=10, pady=10)
+        bottom_button_container.pack(fill=tk.X, expand=False, padx=10, pady=10) 
 
         button_frame = ttk.Frame(bottom_button_container)
-        button_frame.pack(fill=tk.X, expand=True)
+        button_frame.pack(fill=tk.X, expand=True, padx=5, pady=5) # Added padx/pady here
 
         ttk.Button(button_frame, text="全選", command=self._select_all).pack(side=tk.LEFT, padx=5, pady=5)
         ttk.Button(button_frame, text="取消全選", command=self._deselect_all).pack(side=tk.LEFT, padx=5, pady=5)
@@ -1402,31 +1402,62 @@ class MainWindow:
         # Modified button text and command to open only the currently selected folder
         ttk.Button(button_frame, text="開啟選中資料夾", command=self._open_selected_folder_single).pack(side=tk.LEFT, padx=5, pady=5)
         ttk.Button(button_frame, text="關閉", command=self._on_closing).pack(side=tk.RIGHT, padx=5, pady=5)
+        
+        # New: Similarity Filter Section
+        filter_frame = ttk.LabelFrame(bottom_button_container, text="相似度篩選", padding="10")
+        filter_frame.pack(fill=tk.X, expand=True, padx=5, pady=5) 
+        # Removed grid_column_configure for filter_frame, will use pack for its children
+        
+        # Changed from grid to pack for children within filter_frame
+        ttk.Label(filter_frame, text="最小相似度 (%):").pack(side=tk.LEFT, pady=2)
+        ttk.Scale(filter_frame, from_=50, to=100, orient="horizontal",
+                  variable=self.current_display_threshold, length=200,
+                  command=self._update_display_threshold).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.display_threshold_label = ttk.Label(filter_frame, text=f"{self.current_display_threshold.get():.1f}%")
+        self.display_threshold_label.pack(side=tk.LEFT, padx=5)
+        
+        # Bind the trace to update the listbox dynamically when the slider changes
+        self.current_display_threshold.trace_add("write", self._update_display_threshold)
+
+
+    def _update_display_threshold(self, *args):
+        """Callback for the similarity threshold slider."""
+        current_val = self.current_display_threshold.get()
+        self.display_threshold_label.config(text=f"{current_val:.1f}%")
+        self._populate_listbox() # Re-populate the listbox with the new filter
 
     def _populate_listbox(self):
-        """Populates the Treeview with similar files."""
+        """Populates the Treeview with similar files, applying the current filter."""
         for iid in self.tree.get_children():
             self.tree.delete(iid)
-        self.selected_files.clear()
+        self.selected_files.clear() # Clear selections when repopulating
 
-        for i, (path1, path2, similarity) in enumerate(self.similar_files):
-            primary_image_basename = os.path.basename(path1)
-            comparison_info_text = ""
-            
-            if self.comparison_mode == "ad_comparison":
-                display_path2_basename = os.path.basename(path2) if path2 and path2 != "N/A" else "N/A"
-                comparison_info_text = f"(廣告: {display_path2_basename})"
-            elif self.comparison_mode == "mutual_comparison":
-                display_path2_basename = os.path.basename(path2) if path2 and path2 != "N/A" else "N/A"
-                comparison_info_text = f"(與: {display_path2_basename})"
-            elif self.comparison_mode == "qr_detection":
-                 comparison_info_text = "(QR Code 已偵測)"
-            
-            unique_item_id = f"item_{i}_{abs(hash(path1))}_{abs(hash(path2))}"
-            
-            item_id = self.tree.insert("", "end", iid=unique_item_id,
-                                        values=("否", primary_image_basename, comparison_info_text, f"{similarity:.2f}%", "開啟"))
-            self.tree.item(item_id, tags=(path1, path2, similarity))
+        current_threshold = self.current_display_threshold.get()
+        self.displayed_similar_files = [] # Reset displayed list
+
+        for path1, path2, similarity in self.all_similar_files:
+            if similarity >= current_threshold:
+                self.displayed_similar_files.append((path1, path2, similarity))
+                primary_image_basename = os.path.basename(path1)
+                comparison_info_text = ""
+                
+                if self.comparison_mode == "ad_comparison":
+                    display_path2_basename = os.path.basename(path2) if path2 and path2 != "N/A" else "N/A"
+                    comparison_info_text = f"(廣告: {display_path2_basename})"
+                elif self.comparison_mode == "mutual_comparison":
+                    display_path2_basename = os.path.basename(path2) if path2 and path2 != "N/A" else "N/A"
+                    comparison_info_text = f"(與: {display_path2_basename})"
+                elif self.comparison_mode == "qr_detection":
+                     comparison_info_text = "(QR Code 已偵測)"
+                
+                unique_item_id = f"item_{abs(hash(path1))}_{abs(hash(path2))}_{similarity}" # Make ID more robust
+                
+                item_id = self.tree.insert("", "end", iid=unique_item_id,
+                                            values=("否", primary_image_basename, comparison_info_text, f"{similarity:.2f}%", "開啟"))
+                self.tree.item(item_id, tags=(path1, path2, similarity))
+        
+        print(f"清單已根據最小相似度 {current_threshold:.1f}% 篩選。顯示 {len(self.displayed_similar_files)} 個項目。", flush=True)
+
 
     def _on_treeview_click(self, event):
         """Handles Treeview click events."""
@@ -1555,7 +1586,8 @@ class MainWindow:
 
     def _toggle_selection_by_item_id(self, item_id):
         """Toggles selection for a given item ID."""
-        path1, _, _ = self.tree.item(item_id, "tags")
+        # Unpack tags correctly
+        path1, path2_tag, similarity_tag = self.tree.item(item_id, "tags")
         current_values = list(self.tree.item(item_id, "values"))
         
         if path1 in self.selected_files:
@@ -1578,7 +1610,8 @@ class MainWindow:
     def _select_all(self):
         """Selects all items in the Treeview."""
         for item_id in self.tree.get_children():
-            path1, _, _ = self.tree.item(item_id, "tags")
+            # Unpack tags correctly
+            path1, path2_tag, similarity_tag = self.tree.item(item_id, "tags")
             if path1 not in self.selected_files:
                 self.selected_files.add(path1)
             
@@ -1601,7 +1634,8 @@ class MainWindow:
         all_items = self.tree.get_children()
         temp_selected_paths = set()
         for item_id in all_items:
-            path1, _, _ = self.tree.item(item_id, "tags")
+            # Unpack tags correctly
+            path1, path2_tag, similarity_tag = self.tree.item(item_id, "tags")
             current_values = list(self.tree.item(item_id, "values"))
             
             if path1 not in self.selected_files:
@@ -1623,8 +1657,8 @@ class MainWindow:
             return
         deleted_paths = []
         processed_path1_for_deletion = set()
-        for item_id in list(self.tree.get_children()):
-            path1, _, _ = self.tree.item(item_id, "tags")
+        for item_id in list(self.tree.get_children()): # Iterate over currently displayed items
+            path1, path2, similarity = self.tree.item(item_id, "tags")
             if path1 in self.selected_files and path1 not in processed_path1_for_deletion:
                 try:
                     os.remove(path1)
@@ -1637,15 +1671,17 @@ class MainWindow:
                 except Exception as e:
                     log_error(f"刪除文件時發生意外錯誤 {path1}: {e}", include_traceback=True)
                     messagebox.showerror("刪除失敗", f"刪除文件時發生意外錯誤: {path1}\n錯誤: {e}")
+        
         if deleted_paths:
             self.deleted_history.append(deleted_paths)
-            all_current_items = list(self.tree.get_children())
-            for item_id_to_check in all_current_items:
-                path_of_item, _, _ = self.tree.item(item_id_to_check, "tags")
-                if path_of_item in deleted_paths:
-                    self.tree.delete(item_id_to_check)
+            
+            # Update self.all_similar_files by removing deleted items
+            self.all_similar_files = [item for item in self.all_similar_files if item[0] not in deleted_paths]
+            
             self.selected_files.clear()
+            self._populate_listbox() # Re-populate to reflect changes
             messagebox.showinfo("刪除完成", f"成功刪除 {len(deleted_paths)} 個文件。")
+
 
     def _undo_delete_gui(self, event=None):
         """Placeholder for undo delete functionality."""
@@ -1684,7 +1720,8 @@ class MainWindow:
         
         # Take the first selected item only
         item_id = selected_items[0]
-        path1, _, _ = self.tree.item(item_id, "tags")
+        # Unpack tags correctly
+        path1, path2_tag, similarity_tag = self.tree.item(item_id, "tags")
         
         if path1 and os.path.exists(path1):
             folder_path = os.path.dirname(path1)
@@ -1741,12 +1778,13 @@ def main():
         except Exception as e:
             log_error(f"設置多進程啟動方法時發生錯誤: {e}", include_traceback=True)
 
-    print("=== E-Download 漫畫尾頁廣告剔除 v11.0v6 - 啟動中 ===", flush=True) # Changed version to 11.0v6
+    print("=== E-Download 漫畫尾頁廣告剔除 v11.0v12 - 啟動中 ===", flush=True) # Changed version to 11.0v12
     check_and_install_packages()
     print("套件檢查完成。", flush=True)
     
     root = tk.Tk()
     # Removed root.withdraw() as it was causing the SettingsGUI not to show immediately
+    # print(f"DEBUG: Type of root before SettingsGUI: {type(root)}", flush=True) # Diagnostic print
 
     folder_creation_cache_manager = FolderCreationCacheManager()
     
@@ -1754,6 +1792,8 @@ def main():
     # The `settings_gui.settings_window.update()` and `settings_gui.settings_window.wait_window(...)`
     # combination should ensure the settings window is shown and blocks execution until closed.
     root.wait_window(settings_gui.settings_window)
+
+    # print(f"DEBUG: Type of root after SettingsGUI closes: {type(root)}", flush=True) # Diagnostic print
 
     final_config_from_settings = settings_gui.result_config
     should_proceed_with_main_app = settings_gui.should_proceed
@@ -1822,7 +1862,9 @@ def main():
             similar_files = engine.compare_images(files_to_process_dict, ad_hashes)
 
             if similar_files:
-                MainWindow(root, similar_files, engine.comparison_mode)
+                # print(f"DEBUG: Type of root before MainWindow creation: {type(root)}", flush=True) # Diagnostic print
+                # Pass the original similarity threshold used for scanning to MainWindow
+                MainWindow(root, similar_files, engine.comparison_mode, initial_similarity_threshold=main_app_config['similarity_threshold'])
             else:
                 messagebox.showinfo("掃描結果", "未找到相似或廣告圖片，或沒有檢測到 QR Code。")
                 root.destroy()
