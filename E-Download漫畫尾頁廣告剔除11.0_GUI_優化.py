@@ -1,6 +1,6 @@
 # ======================================================================
 # 檔案名稱：E-Download漫畫尾頁廣告剔除11.0_GUI_優化.py
-# 版本號：11.0v7
+# 版本號：11.0v75
 #
 # === 程式說明 ===
 # 這是一個專為清理 E-Download 資料夾中漫畫檔案尾頁廣告的工具。
@@ -8,48 +8,86 @@
 # 適用於處理大量漫畫檔案，節省手動篩選時間。
 # 支援三種比對模式：廣告比對、互相比對和 QR Code 檢測。
 #
-# === 11.0v7 版本更新內容 ===
-# - **版本號更新**: 將程式版本號從 `11.0v6` 更新為 `11.0v7`。
-# - **滑動條步進與顯示優化**:
+# === 11.0v75 版本更新內容 (基於 11.0v74 修正) ===
+# - **版本號更新**: 將程式版本號從 `11.0v74` 更新為 `11.0v75`。
+# - **預覽圖片點擊開啟資料夾**:
+#   - 在 `MainWindow` 中，現在可以點擊右側的「目標圖片預覽」和「比對圖片預覽」
+#     區域內的圖片，直接開啟該圖片所在的資料夾。
+# - **列表「選取」欄位顯示優化**:
+#   - 將左側 Treeview 列表中的「選取」欄位顯示從文字「是/否」變更為視覺化的
+#     「☑」(打勾) 和「☐」(空框)，讓介面更加清晰美觀。
+# - **QR Code 檢測邏輯修復與優化**: (已在 11.0v74 修正)
+#   - 修正了 `AttributeError: module 'pyzbar' has no attribute 'decode'` 錯誤。
+#   - 在 `ImageComparisonEngine` 的 `_detect_qr_codes` 方法中，QR Code 檢測
+#     現在改為使用 OpenCV 內建的 `cv2.QRCodeDetector()`。
+#   - 程式仍然會使用 Pillow (PIL) 載入圖片並進行 EXIF 方向處理與色彩模式轉換，
+#     確保圖片預處理的穩健性，然後再傳遞給 OpenCV 進行 QR Code 檢測。
+# - **修正 ImageComparisonEngine 方法調用錯誤**: (已在 11.0v72 修正)
+#   - 修正 `_compare_with_ads`、`_compare_mutually` 和 `_detect_qr_codes`
+#     方法在 `ImageComparisonEngine` 類別中的縮排問題。這解決了之前程式報告的
+#     `AttributeError: 'ImageComparisonEngine' object has no attribute '_detect_qr_codes'` 錯誤，
+#     確保這些方法能被正確識別並調用。
+# - **QR Code 檢測模式獨立化**: (已在 11.0v71 修正)
+#   - 將「啟用 QR Code 掃描」從設定介面的一個獨立核取方塊，調整為「比對模式」中的一個獨立單選按鈕。
+#   - 使用者現在可以明確選擇「廣告比對」、「互相比對」或「QR Code 檢測」作為主要比對模式。
+#   - 當選擇「廣告比對」以外的模式時，程式會自動禁用「廣告圖片資料夾」的輸入框。
+#   - 如果系統缺少 QR Code 掃描所需的核心依賴（`opencv-python`、`pyzbar`），
+#     則「QR Code 檢測」選項將會被禁用，並顯示提示訊息。
+# - **滑動條步進與顯示優化**: (已在 11.0v71 修正)
 #   - 移除 `ttk.Scale` 中不兼容的 `-resolution` 選項，解決 `TclError` 錯誤。
 #   - 修正設定介面與結果顯示介面中的相似度閾值滑動條，使其數值顯示強制四捨五入到整數百分比，
-#     達到視覺上 1% 步進的效果，而非小數點移動。同時，篩選邏輯也將基於四捨五入後的整數值。
-# - **列表方向鍵導航修正**:
+#     達到視覺上 1% 步進的效果。同時，篩選邏輯也將基於四捨五入後的整數值。
+# - **列表方向鍵導航修正**: (已在 11.0v71 修正)
 #   - 修正 `MainWindow` 中圖片列表使用方向鍵（上下箭頭）導航時，一次移動兩格的問題。
 #     現在每次按鍵只會移動到上一個或下一個單一項目，並透過事件中斷機制防止重複觸發。
-# - **GUI 佈局健壯性強化**:
+# - **GUI 佈局健壯性強化**: (已在 11.0v71 修正)
 #   - 徹底解決了 `MainWindow` 初始化時因 `grid_row_configure`
 #     和 `grid_column_configure` 導致的 `AttributeError` 錯誤。現在 `MainWindow`
 #     及其子框架內所有元件的佈局都統一使用 `pack` 佈局管理器，
 #     或僅在 Tkinter 根視窗上應用 `grid` 佈局管理器，避免了潛在的屬性衝突。
-# - **修正 `NameError`**: 在 `load_ad_hashes` 函數中，將 `AD_HASH_FILE` 修正為
-#   正確的全局常量 `AD_HASH_CACHE_FILE`，解決了 `NameError: name 'AD_HASH_FILE' is not定義`。
-# - **修正 `AttributeError` (SettingsGUI)**: 調整 `SettingsGUI` 類中
-#   `self.enable_extract_count_checkbox` 變數名稱為 `self.chk_enable_extract_count`，
-#   以排除潛在的命名衝突或屬性賦值問題。
-# - **新增圖片抽取數量限制開關**: 在設定介面中增加一個選項，允許使用者選擇是「提取末尾 N 張圖片」
-#   還是「掃描資料夾內所有圖片」，提供更靈活的掃描控制。
-# - **相似度閾值動態調整**: 在結果顯示介面 (`MainWindow`) 中加入一個滑塊和數值顯示，
-#   讓使用者可以直接調整相似度閾值，並即時篩選顯示的結果，無需重新運行掃描。
-# - **修正時間篩選邏輯**: 調整 `get_all_subfolders` 函數，確保時間篩選只應用於
-#   `root_scan_folder` (根掃描資料夾) 下的子資料夾，而不是根資料夾本身。
-#   這解決了當根資料夾建立時間不在篩選範圍內時，導致所有子資料夾都被跳過的問題。
-# - **哈希演算法優化**: 將圖片感知哈希比對演算法從 `average_hash` (ahash)
-#   更新為 `perceptual_hash` (phash)，以增加圖片相似度比對的準確度。
-# - **快取優化**: 掃描圖片哈希快取檔案 (`scanned_hashes_cache.json`) 現在會根據
-#   「根掃描資料夾」的路徑動態生成一個專屬的檔案名稱，確保每個不同根掃描資料夾的快取相互獨立。
-# - **功能調整**: 將「開啟所有選中資料夾」功能修改為「開啟選中資料夾」。
-#   現在只會開啟列表中第一個被反白選中（滑鼠選中）的圖片所在的資料夾。
-# - **修正錯誤**: 修正了「打開資料夾」功能在某些情況下錯誤地開啟「我的文件」資料夾的問題，
-#   現在使用更穩健的 `start` 命令透過 shell 開啟資料夾。
-# - **基礎版本**: 此版本基於 "1140614谷歌版-可用版-只有調整排序.PY" 進行組織與命名更新。
-# - **功能強化**: 正式啟用並實作資料夾「建立時間」篩選功能。
-# - **性能優化**: 引入資料夾建立時間快取機制 (JSON 檔案)，大幅提升後續掃描效率。
-# - **程式碼重構**: 統一導入語句，並對部分程式碼邏輯進行整理，提高可讀性和維護性。
-# - **核心邏輯實作**: 將 ImageComparisonEngine 中的圖片哈希計算、相似度比對和 QR Code 偵測邏輯從模擬替換為實際功能。
-# - **新增掃描圖片哈希快取**: 實作了掃描圖片的哈希快取功能，包括讀取、寫入、增量更新和強制重建，進一步提升效率。
-# - **錯誤修復 (閃退問題)**: 修正 `extract_last_n_files_from_folders` 函數中 `log_error` 呼叫的語法錯誤，
-#   並增強 `log_error` 函數的寫入即時性。
+# - **修正 `NameError`**: (已在 11.0v71 修正)
+#   - 在 `load_ad_hashes` 函數中，將 `AD_HASH_FILE` 修正為
+#     正確的全局常量 `AD_HASH_CACHE_FILE`，解決了 `NameError: name 'AD_HASH_FILE' is not定義`。
+# - **修正 `AttributeError` (SettingsGUI)**: (已在 11.0v71 修正)
+#   - 調整 `SettingsGUI` 類中 `self.enable_extract_count_checkbox` 變數名稱為
+#     `self.chk_enable_extract_count`，以排除潛在的命名衝突或屬性賦值問題。
+# - **新增圖片抽取數量限制開關**: (已在 11.0v71 修正)
+#   - 在設定介面中增加一個選項，允許使用者選擇是「提取末尾 N 張圖片」
+#     還是「掃描資料夾內所有圖片」，提供更靈活的掃描控制。
+# - **相似度閾值動態調整**: (已在 11.0v71 修正)
+#   - 在結果顯示介面 (`MainWindow`) 中加入一個滑塊和數值顯示，
+#     讓使用者可以直接調整相似度閾值，並即時篩選顯示的結果，無需重新運行掃描。
+# - **修正時間篩選邏輯**: (已在 11.0v71 修正)
+#   - 調整 `get_all_subfolders` 函數，確保時間篩選只應用於
+#     `root_scan_folder` (根掃描資料夾) 下的子資料夾，而不是根資料夾本身。
+#     這解決了當根資料夾建立時間不在篩選範圍內時，導致所有子資料夾都被跳過的問題。
+# - **哈希演算法優化**: (已在 11.0v71 修正)
+#   - 將圖片感知哈希比對演算法從 `average_hash` (ahash)
+#     更新為 `perceptual_hash` (phash)，以增加圖片相似度比對的準確度。
+# - **快取優化**: (已在 11.0v71 修正)
+#   - 掃描圖片哈希快取檔案 (`scanned_hashes_cache.json`) 現在會根據
+#     「根掃描資料夾」的路徑動態生成一個專屬的檔案名稱，確保每個不同根掃描資料夾的快取相互獨立。
+# - **功能調整**: (已在 11.0v71 修正)
+#   - 將「開啟所有選中資料夾」功能修改為「開啟選中資料夾」。
+#     現在只會開啟列表中第一個被反白選中（滑鼠選中）的圖片所在的資料夾。
+# - **修正錯誤**: (已在 11.0v71 修正)
+#   - 修正了「打開資料夾」功能在某些情況下錯誤地開啟「我的文件」資料夾的問題，
+#     現在使用更穩健的 `start` 命令透過 shell 開啟資料夾。
+# - **基礎版本**: (已在 11.0v71 修正)
+#   - 此版本基於 "1140614谷歌版-可用版-只有調整排序.PY" 進行組織與命名更新。
+# - **功能強化**: (已在 11.0v71 修正)
+#   - 正式啟用並實作資料夾「建立時間」篩選功能。
+# - **性能優化**: (已在 11.0v71 修正)
+#   - 引入資料夾建立時間快取機制 (JSON 檔案)，大幅提升後續掃描效率。
+# - **程式碼重構**: (已在 11.0v71 修正)
+#   - 統一導入語句，並對部分程式碼邏輯進行整理，提高可讀性和維護性。
+# - **核心邏輯實作**: (已在 11.0v71 修正)
+#   - 將 ImageComparisonEngine 中的圖片哈希計算、相似度比對和 QR Code 偵測邏輯從模擬替換為實際功能。
+# - **新增掃描圖片哈希快取**: (已在 11.0v71 修正)
+#   - 實作了掃描圖片的哈希快取功能，包括讀取、寫入、增量更新和強制重建，進一步提升效率。
+# - **錯誤修復 (閃退問題)**: (已在 11.0v71 修正)
+#   - 修正 `extract_last_n_files_from_folders` 函數中 `log_error` 呼叫的語法錯誤，
+#     並增強 `log_error` 函數的寫入即時性。
 #
 # === 導入必要套件 ===
 # 1. Pillow (PIL): 圖片處理庫
@@ -208,7 +246,7 @@ default_config = {
     'comparison_mode': 'ad_comparison', # Comparison mode: 'ad_comparison' or 'mutual_comparison' or 'qr_detection'
     'similarity_threshold': 85,      # Image similarity threshold (0-100)
     'rebuild_ad_cache': False,       # Whether to rebuild ad image hash cache
-    'qr_scan_enabled': False,        # Whether QR Code scanning is enabled
+    # 'qr_scan_enabled': False,      # Removed: Now part of comparison_mode
     'enable_time_filter': False,     # Whether time filtering is enabled
     'start_date_filter': '',         # Start date for time filter (format:YYYY-MM-DD)
     'end_date_filter': ''            # End date for time filter (format:YYYY-MM-DD)
@@ -673,7 +711,7 @@ def _pool_worker_hash_and_mtime(image_path):
 class ImageComparisonEngine:
     def __init__(self, root_scan_folder, ad_folder_path, extract_count, excluded_folders,
                  enable_time_filter, start_date_filter, end_date_filter,
-                 similarity_threshold, comparison_mode, rebuild_ad_cache, qr_scan_enabled,
+                 similarity_threshold, comparison_mode, rebuild_ad_cache, system_qr_scan_capability, # Renamed qr_scan_enabled to system_qr_scan_capability
                  scanned_hashes_cache_manager, enable_extract_count_limit): # Modified: Added enable_extract_count_limit
         self.root_scan_folder = root_scan_folder
         self.ad_folder_path = ad_folder_path
@@ -685,11 +723,11 @@ class ImageComparisonEngine:
         self.start_date_filter = start_date_filter
         self.end_date_filter = end_date_filter
         self.similarity_threshold = similarity_threshold
-        # Adjust comparison mode names to be consistent with old logic
-        self.comparison_mode = comparison_mode if comparison_mode != 'ad_vs_scanned' else 'ad_comparison'
-        self.comparison_mode = self.comparison_mode if self.comparison_mode != 'scanned_vs_scanned' else 'mutual_comparison'
+        # comparison_mode now directly contains 'ad_comparison', 'mutual_comparison', or 'qr_detection'
+        self.comparison_mode = comparison_mode 
         self.rebuild_ad_cache = rebuild_ad_cache
-        self.qr_scan_enabled = qr_scan_enabled # Get QR scan status from settings
+        self.system_qr_scan_capability = system_qr_scan_capability # Store the global capability flag
+        
         self.image_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff')
         
         self.target_hashes = {} # Stores hashes of target images
@@ -839,10 +877,10 @@ class ImageComparisonEngine:
         elif self.comparison_mode == "mutual_comparison":
             similar_files = self._compare_mutually(threshold_diff)
         elif self.comparison_mode == "qr_detection":
-            if self.qr_scan_enabled and QR_SCAN_ENABLED: # Check settings and global dependency
+            if self.system_qr_scan_capability: # Check the system capability here
                 similar_files = self._detect_qr_codes()
             else:
-                print("QR Code 掃描功能未啟用或缺少依賴，無法執行 QR Code 檢測模式。", flush=True) # Added flush=True
+                print("QR Code 掃描功能因缺少依賴而被禁用，無法執行 QR Code 檢測模式。", flush=True) # Added flush=True
                 return []
         else:
             print("無效的比對模式，請檢查設定。", flush=True) # Added flush=True
@@ -915,34 +953,50 @@ class ImageComparisonEngine:
         return found_similar
 
     def _detect_qr_codes(self):
-        """檢測圖片中的 QR Code"""
+        """檢測圖片中的 QR Code (使用 OpenCV 內建檢測器)"""
         print("開始檢測圖片中的 QR Code...", flush=True) # Added flush=True
         found_qr_images = []
         progress_interval = max(1, len(self.target_hashes) // 20) # 每 5% 進度打印一次
 
+        # 初始化 OpenCV 的 QRCodeDetector
+        qr_detector = cv2.QRCodeDetector()
+
         for i, (image_path, _) in enumerate(self.target_hashes.items()):
             try:
-                # 使用 OpenCV 讀取圖片，因為 pyzbar 需要 cv2 影像格式
-                img_cv = cv2.imread(image_path)
+                # 1. 使用 Pillow 載入圖片，處理 EXIF 方向並轉換為 RGB 格式 (移除 alpha 通道)
+                with Image.open(image_path) as pil_img:
+                    pil_img = ImageOps.exif_transpose(pil_img) # 處理 EXIF 方向
+                    pil_img = pil_img.convert('RGB') # 確保是 RGB 格式
+
+                    # 2. 將 Pillow 圖片轉換為 NumPy 陣列 (OpenCV 預設 BGR 格式)
+                    img_cv = np.array(pil_img)
+                    img_cv = cv2.cvtColor(img_cv, cv2.COLOR_RGB2BGR) # 從 PIL 的 RGB 轉換為 OpenCV 的 BGR
+
                 if img_cv is None:
-                    log_error(f"無法使用 OpenCV 讀取圖片 (可能損壞或不支持的格式): {image_path}", include_traceback=False) # Added include_traceback=False
+                    log_error(f"無法將圖片轉換為 OpenCV 格式或圖片內容為空: {image_path}", include_traceback=False)
                     continue
 
-                # 將圖片轉換為灰度，有助於 QR Code 檢測
+                # 將圖片轉換為灰度圖，有助於 QR Code 檢測
                 gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-                decoded_objects = pyzbar.decode(gray)
+                
+                # 使用 OpenCV 的 QRCodeDetector 進行檢測和解碼
+                # detectAndDecodeMulti 返回多個結果 (如果有)
+                retval, decoded_info, points, straight_qrcode = qr_detector.detectAndDecodeMulti(gray)
 
-                if decoded_objects:
-                    # 如果找到 QR Code，記錄圖片路徑和 QR Code 內容（如果需要，這裡簡化只記錄找到）
-                    # 為了與其他模式的 similar_files 結構一致，第二個路徑設為 'N/A'
-                    found_qr_images.append((image_path, "N/A", 100.0)) # 100% similarity means QR confirmed found
+                if retval: # 如果檢測到並解碼了 QR Code
+                    # 為了與其他模式的 similar_files 結構一致，第二個路徑設為 'N/A'，相似度 100%
+                    found_qr_images.append((image_path, "N/A", 100.0))
+            except FileNotFoundError:
+                log_error(f"QR Code 檢測失敗: 文件未找到 - {image_path}", include_traceback=False)
+            except UnidentifiedImageError:
+                log_error(f"QR Code 檢測失敗: 無法識別圖片格式或文件已損壞 - {image_path}", include_traceback=False)
             except Exception as e:
-                log_error(f"檢測 QR Code 時發生錯誤於圖片 {image_path}: {e}", include_traceback=True) # Changed to True
+                log_error(f"檢測 QR Code 時發生錯誤於圖片 {image_path}: {e}", include_traceback=True)
 
             if (i + 1) % progress_interval == 0 or (i + 1) == len(self.target_hashes):
-                print(f"  已檢測 {i + 1}/{len(self.target_hashes)} 個圖片...", flush=True) # Added flush=True
+                print(f"  已檢測 {i + 1}/{len(self.target_hashes)} 個圖片...", flush=True)
 
-        print(f"QR Code 檢測完成。找到 {len(found_qr_images)} 個包含 QR Code 的圖片。", flush=True) # Added flush=True
+        print(f"QR Code 檢測完成。找到 {len(found_qr_images)} 個包含 QR Code 的圖片。", flush=True)
         return found_qr_images
         
 class SettingsGUI:
@@ -955,7 +1009,7 @@ class SettingsGUI:
         self.result_config = None
         self.should_proceed = False
         self.rebuild_folder_cache_result = False
-        self.rebuild_scanned_cache_result = False
+        self.rebuild_scanned_cache_result = False # Corrected: This is the actual attribute name
 
         self.config = load_config(self.config_file_path)
 
@@ -1042,15 +1096,21 @@ class SettingsGUI:
         self.comparison_mode_var = tk.StringVar()
         ttk.Radiobutton(mode_frame, text="廣告比對 (廣告圖 vs 掃描圖)", variable=self.comparison_mode_var, value="ad_comparison").pack(anchor="w", pady=2)
         ttk.Radiobutton(mode_frame, text="互相比對 (掃描圖 vs 掃描圖)", variable=self.comparison_mode_var, value="mutual_comparison").pack(anchor="w", pady=2)
-
-        self.qr_scan_enabled_var = tk.BooleanVar()
-        self.qr_scan_checkbox = ttk.Checkbutton(mode_frame, text="啟用 QR Code 掃描", variable=self.qr_scan_enabled_var)
-        self.qr_scan_checkbox.pack(anchor="w", pady=2)
         
+        # QR Code 檢測模式作為獨立選項
+        self.qr_mode_radiobutton = ttk.Radiobutton(mode_frame, text="QR Code 檢測 (僅掃描圖)", variable=self.comparison_mode_var, value="qr_detection")
+        self.qr_mode_radiobutton.pack(anchor="w", pady=2)
+
+        # 根據全局 QR_SCAN_ENABLED 狀態禁用或啟用 QR Code 相關選項
         if not self.qr_scan_feature_enabled_global:
-            self.qr_scan_enabled_var.set(False)
-            self.qr_scan_checkbox.config(state=tk.DISABLED)
-            ttk.Label(mode_frame, text="(功能禁用，缺少依賴)", foreground="red").pack(anchor="w", padx=5)
+            self.qr_mode_radiobutton.config(state=tk.DISABLED)
+            # 如果預設配置是 QR_detection 但依賴不滿足，則將模式設置為 ad_comparison
+            if self.config.get('comparison_mode') == 'qr_detection':
+                self.comparison_mode_var.set('ad_comparison') 
+            ttk.Label(mode_frame, text="(QR Code 檢測功能禁用，缺少依賴)", foreground="red").pack(anchor="w", padx=5)
+        
+        # 綁定 comparison_mode_var 追蹤器，控制廣告資料夾輸入框的啟用/禁用狀態
+        self.comparison_mode_var.trace_add("write", self._toggle_ad_folder_entry_state)
         
         row_idx += 1
 
@@ -1112,12 +1172,10 @@ class SettingsGUI:
         self._update_threshold_label(self.similarity_threshold_var.get())
 
         comparison_mode_cfg = self.config.get('comparison_mode', 'ad_comparison')
-        if comparison_mode_cfg == 'ad_vs_scanned':
-            self.comparison_mode_var.set('ad_comparison')
-        elif comparison_mode_cfg == 'scanned_vs_scanned':
-            self.comparison_mode_var.set('mutual_comparison')
-        else:
-            self.comparison_mode_var.set(comparison_mode_cfg)
+        # Load the comparison mode directly
+        self.comparison_mode_var.set(comparison_mode_cfg)
+        # Manually call the toggle function to set the initial state of ad_folder_entry
+        self._toggle_ad_folder_entry_state() 
 
         self.rebuild_ad_cache_var.set(self.config.get('rebuild_ad_cache', False))
 
@@ -1131,8 +1189,8 @@ class SettingsGUI:
         
         self._toggle_time_filter_fields()
 
-        if self.qr_scan_feature_enabled_global:
-            self.qr_scan_enabled_var.set(self.config.get('qr_scan_enabled', False))
+        # No longer loading qr_scan_enabled_var from config, as it's now part of comparison_mode_var
+        # The state of qr_mode_radiobutton is set during widget creation based on qr_scan_feature_enabled_global
 
     def _setup_bindings(self):
         """Sets up event bindings."""
@@ -1182,6 +1240,16 @@ class SettingsGUI:
             return True
         except ValueError:
             return False
+            
+    def _toggle_ad_folder_entry_state(self, *args):
+        """Enables/disables the ad folder entry based on selected comparison mode."""
+        selected_mode = self.comparison_mode_var.get()
+        if selected_mode == "ad_comparison":
+            self.ad_folder_entry.config(state=tk.NORMAL)
+        else:
+            self.ad_folder_entry.config(state=tk.DISABLED)
+            # Optionally clear the ad_folder_entry if it's disabled and not the current mode.
+            # self.ad_folder_entry.delete(0, tk.END)
 
     def _save_settings(self):
         """Gets current settings from GUI and saves to JSON file."""
@@ -1205,9 +1273,9 @@ class SettingsGUI:
                 'enable_extract_count_limit': self.enable_extract_count_limit_var.get(), # Save the new setting
                 'excluded_folders': [f.strip() for f in self.excluded_folders_text.get("1.0", tk.END).splitlines() if f.strip()],
                 'similarity_threshold': self.similarity_threshold_var.get(),
-                'comparison_mode': self.comparison_mode_var.get(),
+                'comparison_mode': self.comparison_mode_var.get(), # Now directly saves the selected mode
                 'rebuild_ad_cache': self.rebuild_ad_cache_var.get(),
-                'qr_scan_enabled': self.qr_scan_enabled_var.get() if self.qr_scan_feature_enabled_global else False,
+                # 'qr_scan_enabled': self.qr_scan_enabled_var.get() if self.qr_scan_feature_enabled_global else False, # Removed
                 'enable_time_filter': self.enable_time_filter_var.get(),
                 'start_date_filter': self.start_date_var.get(),
                 'end_date_filter': self.end_date_var.get()
@@ -1383,6 +1451,8 @@ class MainWindow:
         self.target_image_label.pack(fill=tk.BOTH, expand=True) 
         self.target_path_label = ttk.Label(self.target_image_frame, text="", wraplength=600)
         self.target_path_label.pack(fill=tk.X) 
+        # Bind click event to target image label for opening folder
+        self.target_image_label.bind("<Button-1>", lambda event: self._on_preview_image_click(event, is_target_image=True))
 
         self.compare_image_frame = ttk.LabelFrame(right_frame, text="比對圖片預覽", padding="10")
         self.compare_image_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5) 
@@ -1390,6 +1460,9 @@ class MainWindow:
         self.compare_image_label.pack(fill=tk.BOTH, expand=True) 
         self.compare_path_label = ttk.Label(self.compare_image_frame, text="", wraplength=600)
         self.compare_path_label.pack(fill=tk.X) 
+        # Bind click event to compare image label for opening folder
+        self.compare_image_label.bind("<Button-1>", lambda event: self._on_preview_image_click(event, is_target_image=False))
+
 
         # Create bottom button container and pack it into the root
         bottom_button_container = ttk.Frame(self.root)
@@ -1458,8 +1531,11 @@ class MainWindow:
                 
                 unique_item_id = f"item_{abs(hash(path1))}_{abs(hash(path2))}_{similarity}" # Make ID more robust
                 
+                # Use checkbox characters for the "Selected" column
+                checkbox_char = "☑" if path1 in self.selected_files else "☐"
+                
                 item_id = self.tree.insert("", "end", iid=unique_item_id,
-                                            values=("否", primary_image_basename, comparison_info_text, f"{similarity:.2f}%", "開啟"))
+                                            values=(checkbox_char, primary_image_basename, comparison_info_text, f"{similarity:.2f}%", "開啟"))
                 self.tree.item(item_id, tags=(path1, path2, similarity))
         
         print(f"清單已根據最小相似度 {current_threshold:.1f}% 篩選。顯示 {len(self.displayed_similar_files)} 個項目。", flush=True)
@@ -1477,14 +1553,14 @@ class MainWindow:
 
         column_id = self.tree.identify_column(event.x)
         
-        if column_id == "#1":
+        if column_id == "#1": # "Selected" column
             self._toggle_selection_by_item_id(item_id)
-        elif column_id == "#2" or column_id == "#3":
+        elif column_id == "#2" or column_id == "#3": # "PrimaryImage" or "ComparisonInfo" column
             self.tree.selection_set(item_id) # Ensure this item is selected for preview
             self.tree.focus(item_id)
             self._on_item_select(None) # Force update preview
             self._toggle_selection_by_item_id(item_id) # Then toggle checkbox
-        elif column_id == "#5":
+        elif column_id == "#5": # "OpenFolder" column
             original_path = self.tree.item(item_id, "tags")[0]
             if original_path and os.path.exists(original_path):
                 folder_path = os.path.dirname(original_path)
@@ -1566,6 +1642,28 @@ class MainWindow:
             path_label_widget.config(text=f"無法載入圖片: {image_path}\n錯誤: {e}")
             log_error(f"載入圖片 {image_path} 錯誤: {e}", include_traceback=True)
 
+    def _on_preview_image_click(self, event, is_target_image):
+        """Opens the folder of the clicked preview image."""
+        if is_target_image:
+            image_path_label = self.target_path_label
+        else:
+            image_path_label = self.compare_path_label
+        
+        full_path_text = image_path_label.cget("text")
+        
+        # Extract the actual path from the label text "路徑: <image_path>"
+        if full_path_text.startswith("路徑: "):
+            image_path = full_path_text[len("路徑: "):].strip()
+        else:
+            image_path = None
+
+        if image_path and os.path.exists(image_path):
+            folder_path = os.path.dirname(image_path)
+            self._open_folder(folder_path)
+        else:
+            messagebox.showwarning("路徑無效", "無法開啟資料夾，圖片路徑無效或未載入。")
+
+
     def _bind_keys(self):
         """Binds keyboard navigation keys."""
         # 重新綁定上下方向鍵，並確保只移動一格
@@ -1613,10 +1711,10 @@ class MainWindow:
         
         if path1 in self.selected_files:
             self.selected_files.remove(path1)
-            current_values[0] = "否"
+            current_values[0] = "☐" # Set to unchecked box
         else:
             self.selected_files.add(path1)
-            current_values[0] = "是"
+            current_values[0] = "☑" # Set to checked box
         
         self.tree.item(item_id, values=current_values)
 
@@ -1637,7 +1735,7 @@ class MainWindow:
                 self.selected_files.add(path1)
             
             current_values = list(self.tree.item(item_id, "values"))
-            current_values[0] = "是"
+            current_values[0] = "☑" # Set to checked box
             self.tree.item(item_id, values=current_values)
         print("已選擇所有項目。", flush=True)
 
@@ -1646,7 +1744,7 @@ class MainWindow:
         self.selected_files.clear()
         for item_id in self.tree.get_children():
             current_values = list(self.tree.item(item_id, "values"))
-            current_values[0] = "否"
+            current_values[0] = "☐" # Set to unchecked box
             self.tree.item(item_id, values=current_values)
         print("已取消選擇所有項目。", flush=True)
 
@@ -1661,9 +1759,9 @@ class MainWindow:
             
             if path1 not in self.selected_files:
                 temp_selected_paths.add(path1)
-                current_values[0] = "是"
+                current_values[0] = "☑" # Set to checked box
             else:
-                current_values[0] = "否"
+                current_values[0] = "☐" # Set to unchecked box
             self.tree.item(item_id, values=current_values)
         self.selected_files = temp_selected_paths
         print("已反轉選擇。", flush=True)
@@ -1799,7 +1897,7 @@ def main():
         except Exception as e:
             log_error(f"設置多進程啟動方法時發生錯誤: {e}", include_traceback=True)
 
-    print("=== E-Download 漫畫尾頁廣告剔除 v11.0v7 - 啟動中 ===", flush=True) # Changed version to 11.0v7
+    print("=== E-Download 漫畫尾頁廣告剔除 v11.0v75 - 啟動中 ===", flush=True) # Changed version to 11.0v75
     check_and_install_packages()
     print("套件檢查完成。", flush=True)
     
@@ -1819,7 +1917,7 @@ def main():
     final_config_from_settings = settings_gui.result_config
     should_proceed_with_main_app = settings_gui.should_proceed
     rebuild_folder_cache_flag = settings_gui.rebuild_folder_cache_result
-    rebuild_scanned_cache_flag = settings_gui.rebuild_scanned_cache_result
+    rebuild_scanned_cache_flag = settings_gui.rebuild_scanned_cache_result # Corrected: used wrong variable name
 
     if should_proceed_with_main_app and final_config_from_settings:
         if rebuild_folder_cache_flag:
@@ -1866,9 +1964,9 @@ def main():
                 start_date_filter=start_date_dt,
                 end_date_filter=end_date_dt,
                 similarity_threshold=main_app_config['similarity_threshold'],
-                comparison_mode=main_app_config['comparison_mode'],
+                comparison_mode=main_app_config['comparison_mode'], # Now directly from config
                 rebuild_ad_cache=main_app_config['rebuild_ad_cache'],
-                qr_scan_enabled=main_app_config['qr_scan_enabled'],
+                system_qr_scan_capability=QR_SCAN_ENABLED, # Pass the global capability directly
                 scanned_hashes_cache_manager=scanned_hashes_cache_manager,
                 enable_extract_count_limit=main_app_config['enable_extract_count_limit'] # Pass the new setting
             )
