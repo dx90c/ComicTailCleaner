@@ -1,6 +1,6 @@
 # ComicTailCleaner
 
-# E-Download 漫畫尾頁廣告剔除工具 v11.8
+# E-Download 漫畫尾頁廣告剔除工具
 
 這是一款用於自動檢測並剔除漫畫尾頁廣告的工具，支援以下功能：
 
