@@ -1,6 +1,6 @@
 # ======================================================================
 # 檔案名稱：E-Download漫畫尾頁廣告剔除11.0_GUI_優化.py
-# 版本號：11.0v77
+# 版本號：11.0v78
 #
 # === 程式說明 ===
 # 這是一個專為清理 E-Download 資料夾中漫畫檔案尾頁廣告的工具。
@@ -8,28 +8,38 @@
 # 適用於處理大量漫畫檔案，節省手動篩選時間。
 # 支援三種比對模式：廣告比對、互相比對和 QR Code 檢測。
 #
+# === 11.0v78 版本更新內容 (基於 11.0v77 穩定版) ===
+# 本次更新為重大功能整合，旨在提升性能、易用性和介面穩定性。
+#
+# 1. **【性能】引入增量比對快取 (Comparison Result Cache)**:
+#    - 新增 `comparison_cache.json` 快取檔案，用於儲存圖片對的比對結果。
+#    - 在後續掃描中，若圖片對未曾變動，程式會直接從快取讀取相似度，
+#      極大地減少了重複計算的耗時，對大型圖庫的二次掃描速度有顯著提升。
+#    - 設定視窗中加入了「重建比對結果快取」的選項。
+#
+# 2. **【功能】新增右鍵選單隱藏功能 (Ban Ad Image)**:
+#    - 在結果列表中的項目上按右鍵，會彈出上下文選單。
+#    - 可選擇「臨時隱藏此廣告的所有結果」，將由特定廣告圖片匹配到的所有項目
+#      從當前列表中暫時隱藏，方便使用者專注於處理其他結果。
+#    - 提供「取消所有隱藏」選項以恢復顯示。
+#
+# 3. **【佈局】徹底修復圖片預覽區佈局問題**:
+#    - 右側的兩個圖片預覽區現在被放置在一個垂直的 `PanedWindow` 中，
+#      使用者可以手動拖動分隔條來調整兩個預覽區的大小。
+#    - **核心修復**: 採用 `<Configure>` 事件綁定機制。圖片的縮放不再依賴不可靠的
+#      `after` 延遲或 `winfo` 瞬間值，而是在預覽區的尺寸實際發生改變後
+#      (如視窗初始化、使用者拖動分隔條或改變視窗大小)，才觸發圖片的重新縮放。
+#    - 此修改徹底解決了之前版本中因佈局計算時序問題導致的
+#      「圖片顯示不全」、「互相擠壓」以及「scale must be > 0」的錯誤。
+#
 # === 11.0v77 版本更新內容 (基於 11.0v76 修正) ===
 # - **版本號更新**: 將程式版本號從 `11.0v76` 更新為 `11.0v77`。
 # - **強化路徑處理**:
 #   - 在 `_open_folder` 方法中，再次確認並強化了路徑正規化邏輯。
 #   - 使用 `os.path.abspath(os.path.normpath(folder_path))` 來確保傳遞給
-#     系統 shell (如 Windows 的 `start` 命令) 的是一個絕對且符合該作業系統
-#     標準格式的路徑 (例如，在 Windows 上統一為 `E:\path\to\folder`)。
-#   - 此修正旨在徹底解決因路徑格式混亂（如混合使用 `/` 和 `\`）
-#     導致的「開啟資料夾」功能不穩定的問題。
+#     系統 shell 的是一個絕對且符合該作業系統標準格式的路徑。
 # - **快取使用情況可視化**:
 #   - 在 `_calculate_hashes_multiprocess` 方法中，加入了詳細的日誌輸出。
-#   - 現在程式執行時，會在控制台（小黑窗）明確顯示總檔案數、
-#     從快取中讀取的檔案數（快取命中）以及需要重新計算哈希的檔案數（快取未命中）。
-#   - 讓使用者能直觀地了解快取機制的運作效率。
-#
-# === 11.0v76 版本更新內容 (基於 11.0v75 修正) ===
-# - **預覽圖片點擊手勢**:
-#   - 當滑鼠移動到右側的「目標圖片預覽」和「比對圖片預覽」區域時，
-#     滑鼠游標現在會變成可點擊的手勢（hand cursor），為使用者提供更清晰的互動提示。
-# - **開啟資料夾路徑穩定性修復**:
-#   - 在 `MainWindow` 的 `_open_folder` 方法中，對所有準備開啟的資料夾路徑
-#     強制使用 `os.path.normpath()` 進行正規化。
 # ======================================================================
 
 
@@ -128,7 +138,8 @@ default_config = {
     'rebuild_ad_cache': False,
     'enable_time_filter': False,
     'start_date_filter': '',
-    'end_date_filter': ''
+    'end_date_filter': '',
+    'rebuild_comparison_cache': False # v78 新增
 }
 
 def load_config(config_path):
@@ -158,6 +169,53 @@ def save_config(config, config_path):
 
 
 # === 7. 快取管理相關 ===
+class ComparisonResultCacheManager:
+    # v78 新增: 用於儲存比對結果的快取管理器
+    def __init__(self, cache_file_path="comparison_cache.json"):
+        self.cache_file_path = cache_file_path
+        self.cache = self._load_cache()
+
+    def _load_cache(self):
+        if os.path.exists(self.cache_file_path):
+            try:
+                with open(self.cache_file_path, 'r', encoding='utf-8') as f:
+                    # Key is "path1||path2", value is similarity
+                    loaded_cache = json.load(f)
+                    print(f"比對結果快取 '{self.cache_file_path}' 已成功載入。", flush=True)
+                    return loaded_cache
+            except json.JSONDecodeError:
+                log_error(f"比對結果快取檔案 '{self.cache_file_path}' 格式不正確，將重建。", include_traceback=True)
+            except Exception as e:
+                log_error(f"載入比對結果快取時發生錯誤: {e}，將重建。", include_traceback=True)
+        return {}
+
+    def save_cache(self):
+        try:
+            with open(self.cache_file_path, 'w', encoding='utf-8') as f:
+                json.dump(self.cache, f, indent=4, ensure_ascii=False)
+            print(f"比對結果快取已成功保存到 '{self.cache_file_path}'。", flush=True)
+        except Exception as e:
+            log_error(f"保存比對結果快取時發生錯誤: {e}", include_traceback=True)
+
+    def get_result(self, path1, path2):
+        key = f"{path1}||{path2}"
+        return self.cache.get(key)
+
+    def update_result(self, path1, path2, similarity):
+        key = f"{path1}||{path2}"
+        self.cache[key] = similarity
+        
+    def invalidate_cache(self):
+        self.cache = {}
+        if os.path.exists(self.cache_file_path):
+            try:
+                os.remove(self.cache_file_path)
+                print(f"比對結果快取檔案 '{self.cache_file_path}' 已刪除。", flush=True)
+            except Exception as e:
+                log_error(f"刪除比對結果快取檔案 '{self.cache_file_path}' 時發生錯誤: {e}", include_traceback=True)
+        print("比對結果快取已失效。", flush=True)
+
+
 class FolderCreationCacheManager:
     def __init__(self, cache_file_path="folder_creation_cache.json"):
         self.cache_file_path = cache_file_path
@@ -433,7 +491,8 @@ class ImageComparisonEngine:
     def __init__(self, root_scan_folder, ad_folder_path, extract_count, excluded_folders,
                  enable_time_filter, start_date_filter, end_date_filter,
                  similarity_threshold, comparison_mode, rebuild_ad_cache, system_qr_scan_capability,
-                 scanned_hashes_cache_manager, enable_extract_count_limit):
+                 scanned_hashes_cache_manager, comparison_result_cache_manager, # v78: 新增
+                 enable_extract_count_limit):
         self.root_scan_folder = root_scan_folder
         self.ad_folder_path = ad_folder_path
         self.extract_count = extract_count
@@ -450,6 +509,7 @@ class ImageComparisonEngine:
         self.target_hashes = {}
         self.ad_hashes_cache = {}
         self.scanned_hashes_cache_manager = scanned_hashes_cache_manager
+        self.comparison_result_cache_manager = comparison_result_cache_manager # v78: 新增
         self.folder_count = 0
         self.file_count = 0
         self.processed_folders_display_interval = 1000
@@ -544,16 +604,13 @@ class ImageComparisonEngine:
             error_message = f"多進程哈希計算過程中發生嚴重錯誤: {e}"
             log_error(error_message, include_traceback=True)
             print(f"\n!!!! 多進程錯誤 !!!! {error_message}", flush=True)
-            # parent=self.root is not available here. A bit tricky.
-            # A simple messagebox without parent might be the best bet if Tkinter root exists.
             try:
-                # Check if a Tkinter root is available to parent the messagebox
                 if tk._default_root and tk._default_root.winfo_exists():
                     messagebox.showerror("程式錯誤 - 多進程", f"多進程計算過程中發生錯誤，程式將關閉。\n錯誤: {e}\n請查看 'error_log.txt'。", parent=tk._default_root)
-                else: # Fallback if no root window
+                else: 
                     messagebox.showerror("程式錯誤 - 多進程", f"多進程計算過程中發生錯誤，程式將關閉。\n錯誤: {e}\n請查看 'error_log.txt'。")
             except Exception:
-                pass # Suppress messagebox errors if GUI isn't ready
+                pass 
             sys.exit(1)
 
         # 步驟 4: 保存快取並返回結果
@@ -590,6 +647,8 @@ class ImageComparisonEngine:
         else:
             print("無效的比對模式，請檢查設定。", flush=True)
             return []
+        
+        self.comparison_result_cache_manager.save_cache() # v78: 保存比對結果快取
         print("比對完成。", flush=True)
         return similar_files
 
@@ -597,16 +656,35 @@ class ImageComparisonEngine:
         print(f"開始與廣告圖片進行比對，相似度閾值: {self.similarity_threshold:.1f}% (哈希差異 <= {int(threshold_diff)})", flush=True)
         found_similar = []
         progress_interval = max(1, len(self.target_hashes) // 20)
+        cache_hits = 0
+        total_comparisons = 0
+
         for i, (target_path, target_phash) in enumerate(self.target_hashes.items()):
             if target_phash is None: continue
             for ad_path, ad_phash in self.ad_hashes_cache.items():
                 if ad_phash is None: continue
-                diff = target_phash - ad_phash
-                if diff <= threshold_diff:
+                
+                total_comparisons += 1
+                cached_similarity = self.comparison_result_cache_manager.get_result(target_path, ad_path)
+                
+                if cached_similarity is not None:
+                    similarity = cached_similarity
+                    cache_hits += 1
+                else:
+                    diff = target_phash - ad_phash
                     similarity = (1 - diff / 64) * 100
+                    self.comparison_result_cache_manager.update_result(target_path, ad_path, similarity)
+                
+                if similarity >= self.similarity_threshold:
                     found_similar.append((target_path, ad_path, similarity))
+
             if (i + 1) % progress_interval == 0 or (i + 1) == len(self.target_hashes):
                 print(f"  已比對 {i + 1}/{len(self.target_hashes)} 個目標圖片...", flush=True)
+
+        if total_comparisons > 0:
+            hit_rate = (cache_hits / total_comparisons * 100) if total_comparisons > 0 else 0
+            print(f"比對快取命中率: {hit_rate:.2f}% ({cache_hits}/{total_comparisons})")
+        
         print(f"廣告比對完成。找到 {len(found_similar)} 個相似圖片。", flush=True)
         return found_similar
 
@@ -617,6 +695,9 @@ class ImageComparisonEngine:
         target_phashes_list = list(self.target_hashes.values())
         n = len(target_paths_list)
         progress_interval = max(1, n // 20)
+        cache_hits = 0
+        total_comparisons = 0
+
         for i in range(n):
             path1 = target_paths_list[i]
             phash1 = target_phashes_list[i]
@@ -625,12 +706,30 @@ class ImageComparisonEngine:
                 path2 = target_paths_list[j]
                 phash2 = target_phashes_list[j]
                 if phash2 is None: continue
-                diff = phash1 - phash2
-                if diff <= threshold_diff:
+
+                total_comparisons += 1
+                # 確保快取鍵的順序一致
+                sorted_paths = tuple(sorted((path1, path2)))
+                cached_similarity = self.comparison_result_cache_manager.get_result(sorted_paths[0], sorted_paths[1])
+
+                if cached_similarity is not None:
+                    similarity = cached_similarity
+                    cache_hits += 1
+                else:
+                    diff = phash1 - phash2
                     similarity = (1 - diff / 64) * 100
+                    self.comparison_result_cache_manager.update_result(sorted_paths[0], sorted_paths[1], similarity)
+
+                if similarity >= self.similarity_threshold:
                     found_similar.append((path1, path2, similarity))
+
             if (i + 1) % progress_interval == 0 or (i + 1) == n:
                 print(f"  已比對 {i + 1}/{n} 個目標圖片...", flush=True)
+        
+        if total_comparisons > 0:
+            hit_rate = (cache_hits / total_comparisons * 100) if total_comparisons > 0 else 0
+            print(f"比對快取命中率: {hit_rate:.2f}% ({cache_hits}/{total_comparisons})")
+            
         print(f"互相比對完成。找到 {len(found_similar)} 對相似圖片。", flush=True)
         return found_similar
 
@@ -673,10 +772,11 @@ class SettingsGUI:
         self.should_proceed = False
         self.rebuild_folder_cache_result = False
         self.rebuild_scanned_cache_result = False
+        self.rebuild_comparison_cache_result = False # v78 新增
         self.config = load_config(self.config_file_path)
         self.settings_window = tk.Toplevel(master)
         self.settings_window.title("E-Download 漫畫尾頁廣告剔除 - 設定")
-        self.settings_window.geometry("700x700")
+        self.settings_window.geometry("700x750") # 增加高度以容納新選項
         self.settings_window.resizable(False, False)
         self.settings_window.transient(master)
         self.settings_window.grab_set()
@@ -749,21 +849,23 @@ class SettingsGUI:
         cache_time_frame.grid_columnconfigure(1, weight=1)
         self.rebuild_ad_cache_var = tk.BooleanVar()
         ttk.Checkbutton(cache_time_frame, text="重建廣告圖片哈希快取", variable=self.rebuild_ad_cache_var).grid(row=0, column=0, columnspan=3, sticky="w", pady=2)
+        self.rebuild_comparison_cache_var = tk.BooleanVar() # v78 新增
+        ttk.Checkbutton(cache_time_frame, text="重建比對結果快取 (下次掃描更快)", variable=self.rebuild_comparison_cache_var).grid(row=1, column=0, columnspan=3, sticky="w", pady=2) # v78 新增
         self.enable_time_filter_var = tk.BooleanVar()
         self.enable_time_filter_checkbox = ttk.Checkbutton(cache_time_frame, text="啟用資料夾建立時間篩選", variable=self.enable_time_filter_var)
-        self.enable_time_filter_checkbox.grid(row=1, column=0, columnspan=3, sticky="w", pady=2)
-        ttk.Label(cache_time_frame, text="從:").grid(row=2, column=0, sticky="w", padx=5)
+        self.enable_time_filter_checkbox.grid(row=2, column=0, columnspan=3, sticky="w", pady=2)
+        ttk.Label(cache_time_frame, text="從:").grid(row=3, column=0, sticky="w", padx=5)
         self.start_date_var = tk.StringVar()
         self.start_date_entry = ttk.Entry(cache_time_frame, textvariable=self.start_date_var, width=15)
-        self.start_date_entry.grid(row=2, column=1, sticky="ew", padx=5)
-        ttk.Label(cache_time_frame, text="(YYYY-MM-DD)").grid(row=2, column=2, sticky="w")
-        ttk.Label(cache_time_frame, text="到:").grid(row=3, column=0, sticky="w", padx=5)
+        self.start_date_entry.grid(row=3, column=1, sticky="ew", padx=5)
+        ttk.Label(cache_time_frame, text="(YYYY-MM-DD)").grid(row=3, column=2, sticky="w")
+        ttk.Label(cache_time_frame, text="到:").grid(row=4, column=0, sticky="w", padx=5)
         self.end_date_var = tk.StringVar()
         self.end_date_entry = ttk.Entry(cache_time_frame, textvariable=self.end_date_var, width=15)
-        self.end_date_entry.grid(row=3, column=1, sticky="ew", padx=5)
-        ttk.Label(cache_time_frame, text="(YYYY-MM-DD)").grid(row=3, column=2, sticky="w")
-        ttk.Button(cache_time_frame, text="重建資料夾時間快取", command=self._rebuild_folder_cache).grid(row=4, column=0, columnspan=3, sticky="w", pady=5)
-        ttk.Button(cache_time_frame, text="重建掃描圖片哈希快取", command=self._rebuild_scanned_cache).grid(row=5, column=0, columnspan=3, sticky="w", pady=5)
+        self.end_date_entry.grid(row=4, column=1, sticky="ew", padx=5)
+        ttk.Label(cache_time_frame, text="(YYYY-MM-DD)").grid(row=4, column=2, sticky="w")
+        ttk.Button(cache_time_frame, text="重建資料夾時間快取", command=self._rebuild_folder_cache).grid(row=5, column=0, columnspan=3, sticky="w", pady=5)
+        ttk.Button(cache_time_frame, text="重建掃描圖片哈希快取", command=self._rebuild_scanned_cache).grid(row=6, column=0, columnspan=3, sticky="w", pady=5)
         row_idx += 1
         button_frame = ttk.Frame(frame, padding="10")
         button_frame.grid(row=row_idx+1, column=0, columnspan=3, sticky="ew", pady=10, padx=5)
@@ -789,6 +891,7 @@ class SettingsGUI:
         self.comparison_mode_var.set(comparison_mode_cfg)
         self._toggle_ad_folder_entry_state()
         self.rebuild_ad_cache_var.set(self.config.get('rebuild_ad_cache', False))
+        self.rebuild_comparison_cache_var.set(self.config.get('rebuild_comparison_cache', False)) # v78 新增
         self.enable_extract_count_limit_var.set(self.config.get('enable_extract_count_limit', True))
         self._toggle_extract_count_fields()
         self.enable_time_filter_var.set(self.config.get('enable_time_filter', False))
@@ -857,6 +960,7 @@ class SettingsGUI:
                 'similarity_threshold': self.similarity_threshold_var.get(),
                 'comparison_mode': self.comparison_mode_var.get(),
                 'rebuild_ad_cache': self.rebuild_ad_cache_var.get(),
+                'rebuild_comparison_cache': self.rebuild_comparison_cache_var.get(), # v78 新增
                 'enable_time_filter': self.enable_time_filter_var.get(),
                 'start_date_filter': self.start_date_var.get(),
                 'end_date_filter': self.end_date_var.get()
@@ -897,6 +1001,11 @@ class SettingsGUI:
         if messagebox.askyesno("重建快取", "這將清空並重建資料夾建立時間快取，此操作可能需要一些時間，確定要繼續嗎？"):
             self.rebuild_folder_cache_result = True
             messagebox.showinfo("快取重建提示", "資料夾建立時間快取已標記為需要重建。下次運行程式時將自動處理此操作。")
+    
+    def _rebuild_comparison_cache(self): # v78 新增
+        if messagebox.askyesno("重建快取", "這將清空並重建圖片比對結果快取，確定要繼續嗎？"):
+            self.rebuild_comparison_cache_result = True
+            messagebox.showinfo("快取重建提示", "比對結果快取已標記為需要重建。下次運行程式時將自動處理此操作。")
 
     def _rebuild_scanned_cache(self):
         if messagebox.askyesno("重建快取", "這將清空並重建掃描圖片哈希快取，此操作可能需要一些時間，確定要繼續嗎？"):
@@ -923,13 +1032,19 @@ class MainWindow:
         self.selected_files = set()
         self.comparison_mode = comparison_mode
         self.deleted_history = deque(maxlen=10)
-        self.img_tk_target = None
-        self.img_tk_compare = None
-        self.max_preview_size = (400, 400)
+        self.max_preview_size = (400, 400) # 預設值，實際會被<Configure>覆蓋
         self.current_display_threshold = tk.DoubleVar(value=initial_similarity_threshold)
         self.original_scan_threshold = initial_similarity_threshold
+
+        # v78 佈局和功能變更
+        self.banned_ad_images = set()
+        self.pil_img_target = None
+        self.pil_img_compare = None
+        self.img_tk_target = None
+        self.img_tk_compare = None
+        
         try:
-            self.root.title("圖片比對結果 - 廣告/相似圖片清理工具")
+            self.root.title("圖片比對結果 - 廣告/相似圖片清理工具 v11.0v78")
             self.root.geometry("1400x850")
             self.root.deiconify()
             self.root.lift()
@@ -978,25 +1093,40 @@ class MainWindow:
         vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.bind("<<TreeviewSelect>>", self._on_item_select)
         self.tree.bind("<Button-1>", self._on_treeview_click)
+        self.tree.bind("<Button-3>", self._show_context_menu) # v78: 右鍵選單
         self.tree.bind("<space>", self._toggle_selection)
         self.tree.bind("<Return>", self._toggle_selection)
         self.tree.bind("<Delete>", self._delete_selected_from_disk)
         self.tree.bind("<BackSpace>", self._delete_selected_from_disk)
         self.root.bind("<Control-z>", self._undo_delete_gui)
-        self.target_image_frame = ttk.LabelFrame(right_frame, text="目標圖片預覽", padding="10")
-        self.target_image_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # v78: 右側佈局大改，使用垂直 PanedWindow
+        right_pane = ttk.Panedwindow(right_frame, orient=tk.VERTICAL)
+        right_pane.pack(fill=tk.BOTH, expand=True)
+
+        self.target_image_frame = ttk.LabelFrame(right_pane, text="目標圖片預覽", padding="10")
+        right_pane.add(self.target_image_frame, weight=1)
         self.target_image_label = ttk.Label(self.target_image_frame, cursor="hand2")
         self.target_image_label.pack(fill=tk.BOTH, expand=True)
         self.target_path_label = ttk.Label(self.target_image_frame, text="", wraplength=600)
         self.target_path_label.pack(fill=tk.X)
         self.target_image_label.bind("<Button-1>", lambda event: self._on_preview_image_click(event, is_target_image=True))
-        self.compare_image_frame = ttk.LabelFrame(right_frame, text="比對圖片預覽", padding="10")
-        self.compare_image_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        self.compare_image_frame = ttk.LabelFrame(right_pane, text="比對圖片預覽", padding="10")
+        right_pane.add(self.compare_image_frame, weight=1)
         self.compare_image_label = ttk.Label(self.compare_image_frame, cursor="hand2")
         self.compare_image_label.pack(fill=tk.BOTH, expand=True)
         self.compare_path_label = ttk.Label(self.compare_image_frame, text="", wraplength=600)
         self.compare_path_label.pack(fill=tk.X)
         self.compare_image_label.bind("<Button-1>", lambda event: self._on_preview_image_click(event, is_target_image=False))
+
+        # v78: 為圖片預覽區綁定 Configure 事件，以實現可靠的縮放
+        self.target_image_label.bind("<Configure>", self._on_preview_resize)
+        self.compare_image_label.bind("<Configure>", self._on_preview_resize)
+
+        # v78: 建立右鍵選單
+        self._create_context_menu()
+        
         bottom_button_container = ttk.Frame(self.root)
         bottom_button_container.pack(fill=tk.X, expand=False, padx=10, pady=10)
         button_frame = ttk.Frame(bottom_button_container)
@@ -1016,34 +1146,91 @@ class MainWindow:
         self.display_threshold_label.pack(side=tk.LEFT, padx=5)
         self.current_display_threshold.trace_add("write", self._update_display_threshold)
 
-    def _update_display_threshold(self, *args):
-        current_val = self.current_display_threshold.get()
-        self.display_threshold_label.config(text=f"{round(current_val):d}%")
+    def _create_context_menu(self): # v78 新增
+        self.context_menu = tk.Menu(self.root, tearoff=0)
+        self.context_menu.add_command(label="臨時隱藏此廣告的所有結果", command=self._ban_ad_image)
+        self.context_menu.add_separator()
+        self.context_menu.add_command(label="取消所有隱藏", command=self._unban_all_ads)
+
+    def _show_context_menu(self, event): # v78 新增
+        if self.comparison_mode != 'ad_comparison':
+            return
+        
+        item_id = self.tree.identify_row(event.y)
+        if not item_id:
+            return
+        
+        # 確保點擊的項目被選中，以便後續操作
+        if item_id not in self.tree.selection():
+            self.tree.selection_set(item_id)
+
+        try:
+            self.context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.context_menu.grab_release()
+
+    def _ban_ad_image(self): # v78 新增
+        selected_items = self.tree.selection()
+        if not selected_items:
+            return
+        
+        item_id = selected_items[0]
+        _, ad_path, _ = self.tree.item(item_id, "tags")
+
+        if ad_path and ad_path != "N/A":
+            self.banned_ad_images.add(ad_path)
+            print(f"已臨時隱藏廣告圖片: {os.path.basename(ad_path)}", flush=True)
+            self._populate_listbox()
+    
+    def _unban_all_ads(self): # v78 新增
+        if not self.banned_ad_images:
+            messagebox.showinfo("提示", "目前沒有被隱藏的廣告。")
+            return
+        self.banned_ad_images.clear()
+        print("已取消所有臨時隱藏。", flush=True)
         self._populate_listbox()
 
+    def _update_display_threshold(self, *args):
+        # v78: 增加鎖定機制，防止無限遞迴
+        if hasattr(self, '_update_threshold_lock') and self._update_threshold_lock:
+            return
+        self._update_threshold_lock = True
+        try:
+            current_val = self.current_display_threshold.get()
+            self.display_threshold_label.config(text=f"{round(current_val):d}%")
+            self._populate_listbox()
+        finally:
+            self._update_threshold_lock = False
+            
     def _populate_listbox(self):
         for iid in self.tree.get_children(): self.tree.delete(iid)
         self.selected_files.clear()
         current_threshold = round(self.current_display_threshold.get())
         self.displayed_similar_files = []
         for path1, path2, similarity in self.all_similar_files:
-            if similarity >= current_threshold:
-                self.displayed_similar_files.append((path1, path2, similarity))
-                primary_image_basename = os.path.basename(path1)
-                comparison_info_text = ""
-                if self.comparison_mode == "ad_comparison":
-                    display_path2_basename = os.path.basename(path2) if path2 and path2 != "N/A" else "N/A"
-                    comparison_info_text = f"(廣告: {display_path2_basename})"
-                elif self.comparison_mode == "mutual_comparison":
-                    display_path2_basename = os.path.basename(path2) if path2 and path2 != "N/A" else "N/A"
-                    comparison_info_text = f"(與: {display_path2_basename})"
-                elif self.comparison_mode == "qr_detection":
-                    comparison_info_text = "(QR Code 已偵測)"
-                unique_item_id = f"item_{abs(hash(path1))}_{abs(hash(path2))}_{similarity}"
-                checkbox_char = "☑" if path1 in self.selected_files else "☐"
-                item_id = self.tree.insert("", "end", iid=unique_item_id, values=(checkbox_char, primary_image_basename, comparison_info_text, f"{similarity:.2f}%", "開啟"))
-                self.tree.item(item_id, tags=(path1, path2, similarity))
-        print(f"清單已根據最小相似度 {current_threshold:.1f}% 篩選。顯示 {len(self.displayed_similar_files)} 個項目。", flush=True)
+            # v78: 篩選被ban的廣告和相似度
+            if similarity < current_threshold or path2 in self.banned_ad_images:
+                continue
+
+            self.displayed_similar_files.append((path1, path2, similarity))
+            primary_image_basename = os.path.basename(path1)
+            comparison_info_text = ""
+            if self.comparison_mode == "ad_comparison":
+                display_path2_basename = os.path.basename(path2) if path2 and path2 != "N/A" else "N/A"
+                comparison_info_text = f"(廣告: {display_path2_basename})"
+            elif self.comparison_mode == "mutual_comparison":
+                display_path2_basename = os.path.basename(path2) if path2 and path2 != "N/A" else "N/A"
+                comparison_info_text = f"(與: {display_path2_basename})"
+            elif self.comparison_mode == "qr_detection":
+                comparison_info_text = "(QR Code 已偵測)"
+            unique_item_id = f"item_{abs(hash(path1))}_{abs(hash(path2))}_{similarity}"
+            checkbox_char = "☑" if path1 in self.selected_files else "☐"
+            item_id = self.tree.insert("", "end", iid=unique_item_id, values=(checkbox_char, primary_image_basename, comparison_info_text, f"{similarity:.2f}%", "開啟"))
+            self.tree.item(item_id, tags=(path1, path2, similarity))
+        
+        banned_count = len(self.banned_ad_images)
+        banned_info = f" (另有 {banned_count} 個廣告結果被隱藏)" if banned_count > 0 else ""
+        print(f"清單已根據最小相似度 {current_threshold:.1f}% 篩選。顯示 {len(self.displayed_similar_files)} 個項目。{banned_info}", flush=True)
 
     def _on_treeview_click(self, event):
         region = self.tree.identify_region(event.x, event.y)
@@ -1069,49 +1256,90 @@ class MainWindow:
             self.tree.focus(item_id)
             self._on_item_select(None)
 
-    def _on_item_select(self, event):
+    def _on_item_select(self, event): # v78: 邏輯簡化，只負責加載PIL對象
         selected_items = self.tree.selection()
         if not selected_items:
+            # 清空圖像和路徑
+            self.pil_img_target = None
+            self.pil_img_compare = None
             self.target_image_label.config(image="")
             self.compare_image_label.config(image="")
             self.target_path_label.config(text="")
             self.compare_path_label.config(text="")
-            self.img_tk_target = None
-            self.img_tk_compare = None
+            self.img_tk_target = self.img_tk_compare = None
             return
+
         item_id = selected_items[0]
         path1, path2, similarity = self.tree.item(item_id, "tags")
-        self._load_and_display_image(path1, self.target_image_label, self.target_path_label, is_target=True)
+
+        # 加載目標圖片
+        self.pil_img_target = self._load_pil_image(path1, self.target_path_label)
+        
+        # 加載比對圖片
         if self.comparison_mode != "qr_detection" and path2 and path2 != "N/A":
-            self._load_and_display_image(path2, self.compare_image_label, self.compare_path_label, is_target=False)
+            self.pil_img_compare = self._load_pil_image(path2, self.compare_path_label)
         else:
+            self.pil_img_compare = None
             self.compare_image_label.config(image="")
             self.compare_path_label.config(text="（QR Code 檢測模式下無比對圖片）" if self.comparison_mode == "qr_detection" else "（無比對圖片）")
             self.img_tk_compare = None
+            
+        # 觸發一次手動的預覽更新
+        self._update_all_previews()
 
-    def _load_and_display_image(self, image_path, label_widget, path_label_widget, is_target):
+    def _load_pil_image(self, image_path, path_label_widget): # v78: 新的輔助函數
         try:
-            self.root.update_idletasks()
-            available_width = label_widget.winfo_width()
-            available_height = label_widget.winfo_height()
-            display_width = max(available_width - 20, 100) if available_width > 1 else self.max_preview_size[0]
-            display_height = max(available_height - 20, 100) if available_height > 1 else self.max_preview_size[1]
             with Image.open(image_path) as img:
                 img = ImageOps.exif_transpose(img)
-                img.thumbnail((display_width, display_height), Image.Resampling.LANCZOS)
-                img_tk = ImageTk.PhotoImage(img)
-                label_widget.config(image=img_tk)
-                label_widget.image = img_tk
                 path_label_widget.config(text=f"路徑: {image_path}")
-                if is_target: self.img_tk_target = img_tk
-                else: self.img_tk_compare = img_tk
+                return img.copy() # 返回PIL Image對象副本
         except Exception as e:
-            label_widget.config(image="")
             error_text = f"無法載入圖片: {os.path.basename(image_path)}"
             if isinstance(e, FileNotFoundError): error_text = f"圖片文件未找到: {image_path}"
             elif isinstance(e, UnidentifiedImageError): error_text = f"圖片格式無法識別或文件已損壞: {image_path}"
             path_label_widget.config(text=error_text)
             log_error(f"載入圖片預覽失敗 '{image_path}': {e}", include_traceback=False)
+            return None
+
+    def _update_all_previews(self): # v78: 手動更新兩個預覽
+        self._resize_and_display(self.target_image_label, self.pil_img_target, is_target=True)
+        self._resize_and_display(self.compare_image_label, self.pil_img_compare, is_target=False)
+
+    def _on_preview_resize(self, event): # v78: 核心佈局修復
+        # 根據觸發事件的組件來更新對應的圖片預覽
+        widget = event.widget
+        if widget == self.target_image_label:
+            self._resize_and_display(widget, self.pil_img_target, is_target=True)
+        elif widget == self.compare_image_label:
+            self._resize_and_display(widget, self.pil_img_compare, is_target=False)
+
+    def _resize_and_display(self, label_widget, pil_image, is_target): # v78: 統一的縮放和顯示函數
+        if pil_image is None:
+            label_widget.config(image="")
+            if is_target: self.img_tk_target = None
+            else: self.img_tk_compare = None
+            return
+
+        width = label_widget.winfo_width()
+        height = label_widget.winfo_height()
+
+        if width <= 1 or height <= 1: # 窗口還未完全繪製
+            return
+            
+        try:
+            img_copy = pil_image.copy()
+            img_copy.thumbnail((width - 10, height - 10), Image.Resampling.LANCZOS)
+            img_tk = ImageTk.PhotoImage(img_copy)
+            
+            label_widget.config(image=img_tk)
+            # 必須保持對PhotoImage對象的引用，否則會被垃圾回收
+            if is_target:
+                self.img_tk_target = img_tk
+            else:
+                self.img_tk_compare = img_tk
+        except Exception as e:
+            log_error(f"預覽圖縮放時出錯: {e}", include_traceback=True)
+
 
     def _on_preview_image_click(self, event, is_target_image):
         image_path_label = self.target_path_label if is_target_image else self.compare_path_label
@@ -1220,21 +1448,15 @@ class MainWindow:
     def _open_folder(self, folder_path):
             """以最穩定的方式開啟資料夾，使用 os.startfile 繞過 shell 解析問題。"""
             try:
-                # 步驟 1: 進行路徑正規化，確保路徑格式正確
                 stable_path = os.path.abspath(os.path.normpath(folder_path))
 
-                # 步驟 2: 檢查路徑是否存在
                 if not os.path.isdir(stable_path):
                     messagebox.showwarning("路徑無效", f"資料夾不存在或無效:\n{stable_path}")
                     return
 
                 print(f"嘗試開啟資料夾 (最終方案): {stable_path}", flush=True)
 
-                # 步驟 3: 根據不同作業系統執行命令
                 if sys.platform == "win32":
-                    # 在 Windows 上，os.startfile() 是最穩健的方式，
-                    # 它直接調用系統 API，類似於檔案總管中的雙擊，
-                    # 能完美處理包含特殊字元（如 ~）的路徑。
                     os.startfile(stable_path)
                 elif sys.platform == "darwin": # macOS
                     subprocess.Popen(["open", stable_path])
@@ -1294,12 +1516,14 @@ def main():
         except Exception as e:
             log_error(f"設置多進程啟動方法時發生錯誤: {e}", include_traceback=True)
     
-    print("=== E-Download 漫畫尾頁廣告剔除 v11.0v77 - 啟動中 ===", flush=True)
+    print("=== E-Download 漫畫尾頁廣告剔除 v11.0v78 - 啟動中 ===", flush=True)
     check_and_install_packages()
     print("套件檢查完成。", flush=True)
     
     root = tk.Tk()
     folder_creation_cache_manager = FolderCreationCacheManager()
+    comparison_result_cache_manager = ComparisonResultCacheManager() # v78: 初始化
+    
     settings_gui = SettingsGUI(root, CONFIG_FILE, QR_SCAN_ENABLED)
     root.wait_window(settings_gui.settings_window)
 
@@ -1307,12 +1531,18 @@ def main():
     should_proceed_with_main_app = settings_gui.should_proceed
     rebuild_folder_cache_flag = settings_gui.rebuild_folder_cache_result
     rebuild_scanned_cache_flag = settings_gui.rebuild_scanned_cache_result
+    rebuild_comparison_cache_flag = settings_gui.rebuild_comparison_cache_result # v78 新增
 
     if should_proceed_with_main_app and final_config_from_settings:
         if rebuild_folder_cache_flag:
             folder_creation_cache_manager.invalidate_cache()
             folder_creation_cache_manager.save_cache()
             print("資料夾建立時間快取已清空。下次運行時將重新建立。", flush=True)
+
+        if rebuild_comparison_cache_flag: # v78 新增
+            comparison_result_cache_manager.invalidate_cache()
+            comparison_result_cache_manager.save_cache()
+            print("比對結果快取已清空。下次運行時將重新建立。", flush=True)
         
         if final_config_from_settings['root_scan_folder']:
             scanned_hashes_cache_manager = ScannedImageHashesCacheManager(final_config_from_settings['root_scan_folder'])
@@ -1353,6 +1583,7 @@ def main():
                 rebuild_ad_cache=main_app_config['rebuild_ad_cache'],
                 system_qr_scan_capability=QR_SCAN_ENABLED,
                 scanned_hashes_cache_manager=scanned_hashes_cache_manager,
+                comparison_result_cache_manager=comparison_result_cache_manager, # v78: 傳入
                 enable_extract_count_limit=main_app_config['enable_extract_count_limit']
             )
 
@@ -1360,7 +1591,8 @@ def main():
             folder_creation_cache_manager.save_cache()
             ad_hashes = {}
             if engine.comparison_mode == 'ad_comparison':
-                ad_hashes = load_ad_hashes(main_app_config['ad_folder_path'], main_app_config['rebuild_ad_cache'])
+                rebuild_ad_flag = main_app_config.get('rebuild_ad_cache', False) or main_app_config.get('rebuild_comparison_cache', False)
+                ad_hashes = load_ad_hashes(main_app_config['ad_folder_path'], rebuild_ad_flag)
             
             similar_files = engine.compare_images(files_to_process_dict, ad_hashes)
 
