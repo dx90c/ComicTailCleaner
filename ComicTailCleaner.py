@@ -1753,7 +1753,7 @@ class MainWindow:
         system = platform.system()
         try:
             if system == "Windows":
-                subprocess.run(['explorer.exe', 'shell:RecycleBinFolder'], check=True)
+                subprocess.run(['explorer.exe', 'shell:RecycleBinFolder'])#, check=True)
                 print("正在嘗試開啟 Windows 資源回收桶...", flush=True)
             elif system == "Darwin":
                 trash_path = os.path.expanduser("~/.Trash")
