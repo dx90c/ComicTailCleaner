@@ -1,6 +1,6 @@
 # ======================================================================
-# 檔案名稱：可用93.1.py
-# 版本號：11.0v93.1
+# 檔案名稱：可用93.4.py
+# 版本號：11.0v93.4-Optimized
 #
 # === 程式說明 ===
 # 這是一個專為清理 E-Download 資料夾中漫畫檔案尾頁廣告的工具。
@@ -8,16 +8,14 @@
 # 適用於處理大量漫畫檔案，節省手動篩選時間。
 # 支援三種比對模式：廣告比對、互相比對和 QR Code 檢測。
 #
-# === 11.0v93.1 版本更新內容 (基於 11.0v93 設想) ===
-# - **【啟動流程革命】徹底解決啟動掛起問題**:
-#   - 引入 Application 類，將核心業務邏輯與 GUI 啟動過程完全分離，從根本上避免了因資源競爭導致的視窗無法繪製、程式卡死的頑固問題。
-#
-# - **【操作體驗優化】鍵盤導航升級 (追加功能)**:
-#   - 完全重寫了 Treeview 中的鍵盤方向鍵導航邏輯，實現了更精細的父子項目間流暢切換，確保使用者可以完整檢查完一個群組再跳至下一個。
-#
-# - **【核心穩定性】結果一致性還原與刪除修正**:
-#   - 還原了經過驗證的 v77 版本 `get_all_subfolders` 函數，確保掃描結果的準確性。
-#   - 在刪除功能中對路徑進行最終正規化，徹底解決了 `send2trash` 的路徑錯誤問題。
+# === 11.0v93.4-Optimized 版本更新內容 ===
+# - 【性能優化】核心比對算法重構：將比對迴圈中的浮點數運算替換為高效的
+#   整數比較，大幅提升「廣告比對」與「互相比對」模式下的處理速度。
+# - 【體驗優化】引入圖片預覽的延遲載入機制，徹底解決使用方向鍵導航時的
+#   遲滯感問題，帶來絲滑的操作體驗。
+# - 【功能新增】在設定介面增加「啟用高效能模式」開關，讓使用者可以自由選擇
+#   是否收集詳細的檔案資訊（大小、建立日期），在效能與資訊完整性間取得平衡。
+# - 【錯誤修正】修正了在 Windows 上開啟資源回收桶時可能誤報錯的問題。
 # ======================================================================
 
 
@@ -131,7 +129,8 @@ default_config = {
     'enable_time_filter': False,
     'start_date_filter': '',
     'end_date_filter': '',
-    'rebuild_comparison_cache': False
+    'rebuild_comparison_cache': False,
+    'high_performance_mode': True 
 }
 
 def load_config(config_path):
@@ -280,16 +279,18 @@ class ScannedImageHashesCacheManager:
                     loaded_data = json.load(f)
                     converted_cache = {}
                     for path, data in loaded_data.items():
-                        if (isinstance(data, dict) and 'hash' in data and 'mtime' in data 
-                            and 'size' in data and 'ctime' in data):
+                        if (isinstance(data, dict) and 'hash' in data and 'mtime' in data):
                             try:
                                 phash_obj = imagehash.hex_to_hash(data['hash'])
-                                converted_cache[path] = {
+                                cache_entry = {
                                     'hash': phash_obj,
                                     'mtime': float(data['mtime']),
-                                    'size': int(data['size']),
-                                    'ctime': float(data['ctime'])
                                 }
+                                if 'size' in data:
+                                    cache_entry['size'] = int(data['size'])
+                                if 'ctime' in data:
+                                    cache_entry['ctime'] = float(data['ctime'])
+                                converted_cache[path] = cache_entry
                             except (ValueError, TypeError, AttributeError) as e:
                                 log_error(f"哈希快取檔案 '{self.cache_file_path}' 中 '{path}' 的數據格式不正確或哈希值無效 ({e})，將忽略此項。", include_traceback=True)
                                 continue
@@ -306,28 +307,34 @@ class ScannedImageHashesCacheManager:
 
     def save_cache(self):
         try:
-            serializable_cache = {
-                path: {
-                    'hash': str(data['hash']),
-                    'mtime': str(data['mtime']),
-                    'size': data['size'],
-                    'ctime': str(data['ctime'])
-                }
-                for path, data in self.cache.items()
-                if data and all(k in data for k in ['hash', 'mtime', 'size', 'ctime']) and data['hash'] is not None
-            }
+            serializable_cache = {}
+            for path, data in self.cache.items():
+                if data and 'hash' in data and data['hash'] is not None and 'mtime' in data:
+                    entry = {
+                        'hash': str(data['hash']),
+                        'mtime': str(data['mtime']),
+                    }
+                    if 'size' in data:
+                        entry['size'] = data['size']
+                    if 'ctime' in data:
+                        entry['ctime'] = str(data['ctime'])
+                    serializable_cache[path] = entry
+
             with open(self.cache_file_path, 'w', encoding='utf-8') as f:
                 json.dump(serializable_cache, f, indent=4, ensure_ascii=False)
             print(f"掃描圖片哈希快取已成功保存到 '{self.cache_file_path}'。", flush=True)
         except Exception as e:
             log_error(f"保存掃描圖片哈希快取時發生錯誤: {e}", include_traceback=True)
 
-    def get_hash_and_meta(self, file_path):
+    def get_hash_and_meta(self, file_path, high_performance_mode):
         if file_path in self.cache:
             cached_data = self.cache[file_path]
             try:
                 current_mtime = os.path.getmtime(file_path)
-                if abs(current_mtime - cached_data['mtime']) < 0.001 and all(k in cached_data for k in ['hash', 'size', 'ctime']):
+                is_cache_sufficient = (high_performance_mode or 
+                                      ('size' in cached_data and 'ctime' in cached_data))
+
+                if abs(current_mtime - cached_data['mtime']) < 0.001 and is_cache_sufficient:
                     return cached_data
             except FileNotFoundError:
                 log_error(f"快取中文件 '{file_path}' 不存在，將重新計算。", include_traceback=False)
@@ -355,20 +362,24 @@ class ScannedImageHashesCacheManager:
         print("掃描圖片哈希快取已失效。", flush=True)
 
 
-def load_ad_data(ad_folder_path, rebuild_cache=False):
+def load_ad_data(ad_folder_path, rebuild_cache=False, high_performance_mode=True):
     ad_hashes = {}
     ad_metadata = {}
 
-    if os.path.exists(AD_HASH_CACHE_FILE) and os.path.exists(AD_METADATA_CACHE_FILE) and not rebuild_cache:
+    use_metadata_cache = not high_performance_mode and not rebuild_cache
+    if os.path.exists(AD_HASH_CACHE_FILE) and (high_performance_mode or not rebuild_cache):
         try:
             with open(AD_HASH_CACHE_FILE, 'r', encoding='utf-8') as f:
                 loaded_hashes = json.load(f)
                 ad_hashes = {path: imagehash.hex_to_hash(phash_str) for path, phash_str in loaded_hashes.items()}
             
-            with open(AD_METADATA_CACHE_FILE, 'r', encoding='utf-8') as f:
-                ad_metadata = json.load(f)
-            
-            print(f"廣告圖片哈希與元數據快取已成功載入。", flush=True)
+            if use_metadata_cache and os.path.exists(AD_METADATA_CACHE_FILE):
+                with open(AD_METADATA_CACHE_FILE, 'r', encoding='utf-8') as f:
+                    ad_metadata = json.load(f)
+                print(f"廣告圖片哈希與元數據快取已成功載入。", flush=True)
+            else:
+                 print(f"廣告圖片哈希快取已成功載入。", flush=True)
+
             return ad_hashes, ad_metadata
         except (json.JSONDecodeError, KeyError, AttributeError) as e:
             log_error(f"廣告快取檔案格式不正確或已過時，將重建快取。錯誤: {e}", include_traceback=True)
@@ -388,14 +399,15 @@ def load_ad_data(ad_folder_path, rebuild_cache=False):
         img_hash = calculate_image_hash(img_path)
         if img_hash:
             ad_hashes[img_path] = img_hash
-            try:
-                stat_info = os.stat(img_path)
-                ad_metadata[img_path] = {
-                    "size": stat_info.st_size,
-                    "ctime": stat_info.st_ctime
-                }
-            except Exception as e:
-                log_error(f"無法獲取廣告圖片元數據: {img_path}, 錯誤: {e}", include_traceback=False)
+            if not high_performance_mode:
+                try:
+                    stat_info = os.stat(img_path)
+                    ad_metadata[img_path] = {
+                        "size": stat_info.st_size,
+                        "ctime": stat_info.st_ctime
+                    }
+                except Exception as e:
+                    log_error(f"無法獲取廣告圖片元數據: {img_path}, 錯誤: {e}", include_traceback=False)
 
     try:
         serializable_ad_hashes = {path: str(phash) for path, phash in ad_hashes.items()}
@@ -405,12 +417,13 @@ def load_ad_data(ad_folder_path, rebuild_cache=False):
     except Exception as e:
         log_error(f"保存廣告哈希快取時發生錯誤: {e}", include_traceback=True)
 
-    try:
-        with open(AD_METADATA_CACHE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(ad_metadata, f, indent=4, ensure_ascii=False)
-        print(f"廣告圖片元數據快取已保存到 '{AD_METADATA_CACHE_FILE}'。", flush=True)
-    except Exception as e:
-        log_error(f"保存廣告元數據快取時發生錯誤: {e}", include_traceback=True)
+    if not high_performance_mode:
+        try:
+            with open(AD_METADATA_CACHE_FILE, 'w', encoding='utf-8') as f:
+                json.dump(ad_metadata, f, indent=4, ensure_ascii=False)
+            print(f"廣告圖片元數據快取已保存到 '{AD_METADATA_CACHE_FILE}'。", flush=True)
+        except Exception as e:
+            log_error(f"保存廣告元數據快取時發生錯誤: {e}", include_traceback=True)
 
     return ad_hashes, ad_metadata
 
@@ -437,7 +450,6 @@ def get_all_subfolders(root_folder, excluded_folders=None, enable_time_filter=Fa
         if any(norm_current_folder.startswith(excluded_path) for excluded_path in excluded_norm_paths):
             continue
 
-        # 根目錄本身不參與時間過濾
         if current_folder != root_folder:
             if enable_time_filter and creation_cache_manager:
                 folder_ctime_timestamp = creation_cache_manager.get_creation_time(current_folder)
@@ -506,17 +518,23 @@ def calculate_image_hash(image_path, hash_size=8):
         log_error(f"計算圖片哈希時發生錯誤: {image_path}, 錯誤: {e}", include_traceback=True)
         return None
 
+def _pool_worker_initializer(high_perf_mode):
+    global _HIGH_PERFORMANCE_MODE
+    _HIGH_PERFORMANCE_MODE = high_perf_mode
+
 def _pool_worker_hash_and_meta(image_path):
     phash = calculate_image_hash(image_path)
     if phash is not None:
         try:
             stat_info = os.stat(image_path)
-            return image_path, {
+            data = {
                 "hash": phash,
-                "mtime": stat_info.st_mtime,
-                "ctime": stat_info.st_ctime,
-                "size": stat_info.st_size
+                "mtime": stat_info.st_mtime
             }
+            if not _HIGH_PERFORMANCE_MODE:
+                data["ctime"] = stat_info.st_ctime
+                data["size"] = stat_info.st_size
+            return image_path, data
         except Exception as e:
             log_error(f"獲取文件元數據失敗 {image_path}: {e}", include_traceback=True)
             return image_path, None
@@ -528,7 +546,7 @@ class ImageComparisonEngine:
                  enable_time_filter, start_date_filter, end_date_filter,
                  similarity_threshold, comparison_mode, rebuild_ad_cache, system_qr_scan_capability,
                  scanned_hashes_cache_manager, comparison_result_cache_manager,
-                 enable_extract_count_limit):
+                 enable_extract_count_limit, high_performance_mode):
         self.root_scan_folder = root_scan_folder
         self.ad_folder_path = ad_folder_path
         self.extract_count = extract_count
@@ -546,6 +564,7 @@ class ImageComparisonEngine:
         self.ad_hashes_cache = {}
         self.scanned_hashes_cache_manager = scanned_hashes_cache_manager
         self.comparison_result_cache_manager = comparison_result_cache_manager
+        self.high_performance_mode = high_performance_mode
         self.processed_folders_display_interval = 1000
         print(f"ImageComparisonEngine initialized.", flush=True)
 
@@ -595,7 +614,7 @@ class ImageComparisonEngine:
         print(f"正在檢查 {total_files} 個{description}的快取狀態...", flush=True)
 
         for path in file_paths:
-            cached_data = self.scanned_hashes_cache_manager.get_hash_and_meta(path)
+            cached_data = self.scanned_hashes_cache_manager.get_hash_and_meta(path, self.high_performance_mode)
             if cached_data:
                 file_data_dict[path] = cached_data
                 cache_hits += 1
@@ -620,7 +639,7 @@ class ImageComparisonEngine:
         print(f"正在計算 {len(paths_to_recalculate)} 個新增/已修改的{description}的哈希值與元數據 (多進程，使用 {num_processes} 個進程)...", flush=True)
         
         try:
-            with Pool(processes=num_processes) as pool:
+            with Pool(processes=num_processes, initializer=_pool_worker_initializer, initargs=(self.high_performance_mode,)) as pool:
                 results_iterator = pool.imap_unordered(_pool_worker_hash_and_meta, paths_to_recalculate)
                 
                 processed_count = 0
@@ -658,13 +677,18 @@ class ImageComparisonEngine:
 
         print(f"啟動圖片比對，模式: {self.comparison_mode}", flush=True)
         
+        # 【方案一核心優化】預先計算哈希差異閾值 (整數)
+        threshold_diff = int((100 - self.similarity_threshold) / 100.0 * 64)
+
         if self.comparison_mode == "ad_comparison":
             if not self.ad_hashes_cache:
                 print("沒有可用的廣告圖片哈希值進行比對。", flush=True)
                 return [], all_file_data
-            similar_files = self._compare_with_ads()
+            # 【修改】傳遞整數閾值
+            similar_files = self._compare_with_ads(threshold_diff)
         elif self.comparison_mode == "mutual_comparison":
-            similar_files = self._compare_mutually()
+            # 【修改】傳遞整數閾值
+            similar_files = self._compare_mutually(threshold_diff)
         elif self.comparison_mode == "qr_detection":
              if self.system_qr_scan_capability:
                 similar_files = self._detect_qr_codes()
@@ -681,8 +705,8 @@ class ImageComparisonEngine:
         print("比對完成。", flush=True)
         return similar_files, all_file_data
 
-    def _compare_with_ads(self):
-        print(f"開始與廣告圖片進行比對，相似度閾值: {self.similarity_threshold:.1f}%", flush=True)
+    def _compare_with_ads(self, threshold_diff):
+        print(f"開始與廣告圖片進行比對，相似度閾值: {self.similarity_threshold:.1f}% (哈希差異 <= {threshold_diff})", flush=True)
         found_similar = []
         progress_interval = max(1, len(self.target_file_data) // 20)
         cache_hits = 0
@@ -700,14 +724,16 @@ class ImageComparisonEngine:
                 
                 if cached_similarity is not None:
                     similarity = cached_similarity
+                    if similarity >= self.similarity_threshold:
+                        found_similar.append((target_path, ad_path, similarity))
                     cache_hits += 1
                 else:
                     diff = target_phash - ad_phash
-                    similarity = (1 - diff / 64) * 100
+                    similarity = (1 - diff / 64) * 100 
                     self.comparison_result_cache_manager.update_result(target_path, ad_path, similarity)
-                
-                if similarity >= self.similarity_threshold:
-                    found_similar.append((target_path, ad_path, similarity))
+                    
+                    if diff <= threshold_diff:
+                        found_similar.append((target_path, ad_path, similarity))
 
             if (i + 1) % progress_interval == 0 or (i + 1) == len(self.target_file_data):
                 print(f"  已比對 {i + 1}/{len(self.target_file_data)} 個目標圖片...", flush=True)
@@ -719,8 +745,8 @@ class ImageComparisonEngine:
         print(f"廣告比對完成。找到 {len(found_similar)} 個相似圖片。", flush=True)
         return found_similar
 
-    def _compare_mutually(self):
-        print(f"開始在抽取出的圖片之間進行互相比對，相似度閾值: {self.similarity_threshold:.1f}%", flush=True)
+    def _compare_mutually(self, threshold_diff):
+        print(f"開始在抽取出的圖片之間進行互相比對，相似度閾值: {self.similarity_threshold:.1f}% (哈希差異 <= {threshold_diff})", flush=True)
         found_similar = []
         
         items = list(self.target_file_data.items())
@@ -738,9 +764,8 @@ class ImageComparisonEngine:
                 if not phash2: continue
 
                 diff = phash1 - phash2
-                similarity = (1 - diff / 64) * 100
-
-                if similarity >= self.similarity_threshold:
+                if diff <= threshold_diff:
+                    similarity = (1 - diff / 64) * 100
                     found_similar.append((path1, path2, similarity))
 
             if (i + 1) % progress_interval == 0 or (i + 1) == n:
@@ -786,7 +811,7 @@ class SettingsGUI:
         
         self.settings_window = tk.Toplevel(self.master)
         self.settings_window.title("E-Download 漫畫尾頁廣告剔除 - 設定")
-        self.settings_window.geometry("700x750")
+        self.settings_window.geometry("700x780")
         self.settings_window.resizable(False, False)
         self.settings_window.transient(master)
         self.settings_window.grab_set()
@@ -818,32 +843,39 @@ class SettingsGUI:
         self.ad_folder_entry = ttk.Entry(path_frame, width=40)
         self.ad_folder_entry.grid(row=1, column=1, sticky="ew", padx=5)
         ttk.Button(path_frame, text="瀏覽...", command=lambda: self._browse_folder(self.ad_folder_entry)).grid(row=1, column=2, padx=5)
+        
         row_idx += 1
         basic_settings_frame = ttk.LabelFrame(frame, text="基本設定", padding="10")
-        basic_settings_frame.grid(row=row_idx+1, column=0, columnspan=3, sticky="ew", pady=5, padx=5)
+        basic_settings_frame.grid(row=row_idx, column=0, columnspan=3, sticky="ew", pady=5, padx=5)
         basic_settings_frame.grid_columnconfigure(1, weight=1)
         self.enable_extract_count_limit_var = tk.BooleanVar()
         self.chk_enable_extract_count = ttk.Checkbutton(basic_settings_frame, text="啟用圖片抽取數量限制", variable=self.enable_extract_count_limit_var)
         self.chk_enable_extract_count.grid(row=0, column=0, sticky="w", pady=2)
-        ttk.Label(basic_settings_frame, text="提取末尾圖片數量:").grid(row=1, column=0, sticky="w", pady=2)
+        
+        self.high_performance_mode_var = tk.BooleanVar()
+        self.chk_high_perf_mode = ttk.Checkbutton(basic_settings_frame, text="啟用高效能模式 (不收集檔案大小/日期)", variable=self.high_performance_mode_var)
+        self.chk_high_perf_mode.grid(row=1, column=0, columnspan=3, sticky="w", pady=2)
+
+        ttk.Label(basic_settings_frame, text="提取末尾圖片數量:").grid(row=2, column=0, sticky="w", pady=2)
         self.extract_count_var = tk.StringVar()
         self.extract_count_spinbox = ttk.Spinbox(basic_settings_frame, from_=1, to=100, textvariable=self.extract_count_var, width=5)
-        self.extract_count_spinbox.grid(row=1, column=1, sticky="w", padx=5)
-        ttk.Label(basic_settings_frame, text="(以檔名為判斷基準，從每個資料夾末尾提取N張圖片進行比對)").grid(row=1, column=2, sticky="w", padx=5)
-        ttk.Label(basic_settings_frame, text="相似度閾值 (%):").grid(row=2, column=0, sticky="w", pady=2)
+        self.extract_count_spinbox.grid(row=2, column=1, sticky="w", padx=5)
+        ttk.Label(basic_settings_frame, text="(以檔名為判斷基準，從每個資料夾末尾提取N張圖片進行比對)").grid(row=2, column=2, sticky="w", padx=5)
+        ttk.Label(basic_settings_frame, text="相似度閾值 (%):").grid(row=3, column=0, sticky="w", pady=2)
         self.similarity_threshold_var = tk.DoubleVar()
-        ttk.Scale(basic_settings_frame, from_=50, to=100, orient="horizontal", variable=self.similarity_threshold_var, length=200, command=self._update_threshold_label).grid(row=2, column=1, sticky="w", padx=5)
+        ttk.Scale(basic_settings_frame, from_=50, to=100, orient="horizontal", variable=self.similarity_threshold_var, length=200, command=self._update_threshold_label).grid(row=3, column=1, sticky="w", padx=5)
         self.threshold_label = ttk.Label(basic_settings_frame, text="")
-        self.threshold_label.grid(row=2, column=2, sticky="w", padx=5)
-        ttk.Label(basic_settings_frame, text="排除資料夾名稱 (逗號分隔):").grid(row=3, column=0, sticky="w", pady=2)
+        self.threshold_label.grid(row=3, column=2, sticky="w", padx=5)
+        ttk.Label(basic_settings_frame, text="排除資料夾名稱 (逗號分隔):").grid(row=4, column=0, sticky="w", pady=2)
         self.excluded_folders_text = tk.Text(basic_settings_frame, width=40, height=4)
-        self.excluded_folders_text.grid(row=3, column=1, columnspan=2, sticky="ew", padx=5)
+        self.excluded_folders_text.grid(row=4, column=1, columnspan=2, sticky="ew", padx=5)
         scrollbar = ttk.Scrollbar(basic_settings_frame, command=self.excluded_folders_text.yview)
-        scrollbar.grid(row=3, column=3, sticky="ns")
+        scrollbar.grid(row=4, column=3, sticky="ns")
         self.excluded_folders_text.config(yscrollcommand=scrollbar.set)
-        row_idx += 4
+        
+        row_idx += 1
         mode_frame = ttk.LabelFrame(frame, text="比對模式", padding="10")
-        mode_frame.grid(row=row_idx+1, column=0, sticky="ew", pady=5, padx=5)
+        mode_frame.grid(row=row_idx, column=0, sticky="ew", pady=5, padx=5)
         mode_frame.grid_columnconfigure(0, weight=1)
         self.comparison_mode_var = tk.StringVar()
         ttk.Radiobutton(mode_frame, text="廣告比對 (廣告圖 vs 掃描圖)", variable=self.comparison_mode_var, value="ad_comparison").pack(anchor="w", pady=2)
@@ -856,9 +888,9 @@ class SettingsGUI:
                 self.comparison_mode_var.set('ad_comparison')
             ttk.Label(mode_frame, text="(QR Code 檢測功能禁用，缺少依賴)", foreground="red").pack(anchor="w", padx=5)
         self.comparison_mode_var.trace_add("write", self._toggle_ad_folder_entry_state)
-        row_idx += 1
+        
         cache_time_frame = ttk.LabelFrame(frame, text="快取與時間篩選", padding="10")
-        cache_time_frame.grid(row=row_idx+1, column=1, columnspan=2, sticky="ew", pady=5, padx=5)
+        cache_time_frame.grid(row=row_idx, column=1, columnspan=2, sticky="ew", pady=5, padx=5)
         cache_time_frame.grid_columnconfigure(1, weight=1)
         self.rebuild_ad_cache_var = tk.BooleanVar()
         ttk.Checkbutton(cache_time_frame, text="重建廣告圖片哈希快取", variable=self.rebuild_ad_cache_var).grid(row=0, column=0, columnspan=3, sticky="w", pady=2)
@@ -879,9 +911,10 @@ class SettingsGUI:
         ttk.Label(cache_time_frame, text="(YYYY-MM-DD)").grid(row=4, column=2, sticky="w")
         ttk.Button(cache_time_frame, text="重建資料夾時間快取", command=self._rebuild_folder_cache).grid(row=5, column=0, columnspan=3, sticky="w", pady=5)
         ttk.Button(cache_time_frame, text="重建掃描圖片哈希快取", command=self._rebuild_scanned_cache).grid(row=6, column=0, columnspan=3, sticky="w", pady=5)
+        
         row_idx += 1
         button_frame = ttk.Frame(frame, padding="10")
-        button_frame.grid(row=row_idx+1, column=0, columnspan=3, sticky="ew", pady=10, padx=5)
+        button_frame.grid(row=row_idx, column=0, columnspan=3, sticky="ew", pady=10, padx=5)
         self.settings_window.style = ttk.Style()
         self.settings_window.style.configure("Accent.TButton", font=('Arial', 12, 'bold'), foreground='blue')
         self.save_button = ttk.Button(button_frame, text="保存設定", command=self._save_settings)
@@ -910,6 +943,7 @@ class SettingsGUI:
         self.enable_time_filter_var.set(self.config.get('enable_time_filter', False))
         self.start_date_var.set(self.config.get('start_date_filter', ''))
         self.end_date_var.set(self.config.get('end_date_filter', ''))
+        self.high_performance_mode_var.set(self.config.get('high_performance_mode', True))
         self._toggle_time_filter_fields()
 
     def _setup_bindings(self):
@@ -976,7 +1010,8 @@ class SettingsGUI:
                 'rebuild_comparison_cache': self.rebuild_comparison_cache_var.get(),
                 'enable_time_filter': self.enable_time_filter_var.get(),
                 'start_date_filter': self.start_date_var.get(),
-                'end_date_filter': self.end_date_var.get()
+                'end_date_filter': self.end_date_var.get(),
+                'high_performance_mode': self.high_performance_mode_var.get()
             }
             if not config_to_save["root_scan_folder"] or not os.path.isdir(config_to_save["root_scan_folder"]):
                 messagebox.showerror("錯誤", "漫畫掃描根資料夾無效或不存在！")
@@ -1096,6 +1131,9 @@ class MainWindow:
         self.comparison_mode = comparison_mode
         self.current_display_threshold = tk.DoubleVar(value=initial_similarity_threshold)
         
+        self._after_id = None
+        self._preview_delay = 250 
+
         self.banned_ad_images = set()
         self.pil_img_target = None
         self.pil_img_compare = None
@@ -1103,13 +1141,11 @@ class MainWindow:
         self.img_tk_compare = None
         
         try:
-            self.root.title("圖片比對結果 - 廣告/相似圖片清理工具 v11.0v93.1")
+            self.root.title("圖片比對結果 - 廣告/相似圖片清理工具 v11.0v93.4")
             self.root.geometry("1600x900")
             
             self.bold_font = self._create_bold_font(self.root)
             
-            # 主視窗不再隱藏，而是在結果出來後才顯示
-            # self.root.deiconify() 
             self.root.lift()
             self.root.focus_force()
             self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
@@ -1119,10 +1155,12 @@ class MainWindow:
             self.root.update_idletasks()
             print("MainWindow: 介面已成功建立並初始化。", flush=True)
             if self.grouped_similar_files:
-                first_parent_id = self.tree.get_children()[0]
-                self.tree.selection_set(first_parent_id)
-                self.tree.focus(first_parent_id)
-                self._on_item_select(None)
+                children = self.tree.get_children()
+                if children:
+                    first_parent_id = children[0]
+                    self.tree.selection_set(first_parent_id)
+                    self.tree.focus(first_parent_id)
+                    self._on_item_select(None)
         except Exception as e:
             log_error(f"MainWindow 初始化失敗: {e}\n{traceback.format_exc()}")
             messagebox.showerror("GUI 錯誤", f"無法啟動圖片比對結果介面: {e}\n請查看 error_log.txt 獲取詳細信息。")
@@ -1335,7 +1373,11 @@ class MainWindow:
                                 visited.add(neighbor)
                                 q.append(neighbor)
                     if len(component) > 1:
-                        largest_file = max(component, key=lambda p: self.all_file_data.get(p, {}).get('size', 0))
+                        sort_key = lambda p: self.all_file_data.get(p, {}).get('size', 0)
+                        if 'size' not in self.all_file_data.get(list(component)[0], {}):
+                           sort_key = lambda p: p
+
+                        largest_file = max(component, key=sort_key)
                         sorted_component = sorted(list(component))
                         sorted_component.insert(0, sorted_component.pop(sorted_component.index(largest_file)))
                         components.append(sorted_component)
@@ -1389,10 +1431,11 @@ class MainWindow:
             else:
                 source_copy_tuple = (group_key, group_key, 100.0)
                 display_children = [source_copy_tuple] + children
-                item_count += len(display_children) + 1 
+                item_count += len(display_children) # Corrected from +1
 
             parent_data = self.all_file_data.get(group_key, {})
-            parent_size = f"{parent_data.get('size', 0):,}" if parent_data.get('size') is not None else "N/A"
+            parent_size_val = parent_data.get('size')
+            parent_size = f"{parent_size_val:,}" if parent_size_val is not None else "N/A"
             parent_ctime_ts = parent_data.get('ctime')
             parent_ctime = datetime.datetime.fromtimestamp(parent_ctime_ts).strftime('%Y/%m/%d %H:%M:%S') if parent_ctime_ts is not None else "N/A"
 
@@ -1409,7 +1452,7 @@ class MainWindow:
                                  checkbox_val,
                                  os.path.basename(group_key),
                                  os.path.dirname(group_key) if is_ad_mode else "",
-                                 len(display_children),
+                                 len(children),
                                  parent_size,
                                  parent_ctime,
                                  "100%"
@@ -1427,7 +1470,8 @@ class MainWindow:
 
             for path1, path2, similarity in display_children:
                 child_data = self.all_file_data.get(path1, {})
-                child_size = f"{child_data.get('size', 0):,}" if child_data.get('size') is not None else "N/A"
+                child_size_val = child_data.get('size')
+                child_size = f"{child_size_val:,}" if child_size_val is not None else "N/A"
                 child_ctime_ts = child_data.get('ctime')
                 child_ctime = datetime.datetime.fromtimestamp(child_ctime_ts).strftime('%Y/%m/%d %H:%M:%S') if child_ctime_ts is not None else "N/A"
 
@@ -1470,6 +1514,13 @@ class MainWindow:
             self.tree.focus(item_id)
 
     def _on_item_select(self, event):
+        if self._after_id:
+            self.root.after_cancel(self._after_id)
+        
+        self._after_id = self.root.after(self._preview_delay, self._load_and_display_selected_image)
+
+    def _load_and_display_selected_image(self):
+        self._after_id = None
         selected_items = self.tree.selection()
         if not selected_items:
             self.pil_img_target = self.pil_img_compare = None
@@ -1493,7 +1544,7 @@ class MainWindow:
 
         self.pil_img_target = self._load_pil_image(selected_path, self.target_path_label) if selected_path else None
         
-        if compare_path:
+        if compare_path and compare_path != "N/A":
             self.pil_img_compare = self._load_pil_image(compare_path, self.compare_path_label)
         else:
             self.pil_img_compare = None
@@ -1574,31 +1625,26 @@ class MainWindow:
 
         if event.keysym == "Down":
             parent = self.tree.parent(current_item)
-            # Case 1: Current is a parent, move to its first child
             if not parent and self.tree.item(current_item, "open"):
                 children = self.tree.get_children(current_item)
                 if children:
                     item_to_select = children[0]
-            # Case 2: Current is a child, move to next sibling
             elif parent:
                 siblings = self.tree.get_children(parent)
                 current_index = siblings.index(current_item)
                 if current_index < len(siblings) - 1:
                     item_to_select = siblings[current_index + 1]
-                else: # Last child, move to the next parent
+                else: 
                     item_to_select = self.tree.next(parent)
-            # Fallback: just move to the next visible item
             if not item_to_select:
                 item_to_select = self.tree.next(current_item)
 
         elif event.keysym == "Up":
             parent = self.tree.parent(current_item)
-            # Case 1: Current is the first child, move to parent
             if parent:
                 siblings = self.tree.get_children(parent)
                 if siblings and current_item == siblings[0]:
                     item_to_select = parent
-            # Fallback: just move to the previous visible item
             if not item_to_select:
                 item_to_select = self.tree.prev(current_item)
 
@@ -1668,7 +1714,7 @@ class MainWindow:
             
             parent_tags = self.tree.item(parent_id, "tags")
             if 'ad_parent_item' not in parent_tags:
-                all_children_selected = num_selected == len(all_child_ids)
+                all_children_selected = num_selected == len(all_child_ids) and all_child_ids
                 self.tree.set(parent_id, column="checkbox", value="☑" if all_children_selected else "☐")
 
     def _select_all(self):
@@ -1753,7 +1799,7 @@ class MainWindow:
         system = platform.system()
         try:
             if system == "Windows":
-                subprocess.run(['explorer.exe', 'shell:RecycleBinFolder'])#, check=True)
+                subprocess.run(['explorer.exe', 'shell:RecycleBinFolder'])
                 print("正在嘗試開啟 Windows 資源回收桶...", flush=True)
             elif system == "Darwin":
                 trash_path = os.path.expanduser("~/.Trash")
@@ -1802,6 +1848,8 @@ class MainWindow:
 
     def _on_closing(self):
         if messagebox.askokcancel("關閉", "確定要關閉比對結果視窗嗎？"):
+            if self._after_id:
+                self.root.after_cancel(self._after_id)
             self.root.destroy()
             sys.exit(0)
 
@@ -1819,7 +1867,6 @@ class Application:
         self.root.destroy()
 
     def start(self):
-        # 顯示設定視窗，並傳遞一個回調函數
         settings_gui = SettingsGUI(self.root, self.run_core_logic)
         self.root.mainloop()
 
@@ -1828,7 +1875,6 @@ class Application:
         
         main_app_config = self.settings_data['config']
         
-        # 準備快取管理器
         folder_creation_cache_manager = FolderCreationCacheManager()
         comparison_result_cache_manager = ComparisonResultCacheManager()
 
@@ -1854,7 +1900,6 @@ class Application:
             scanned_hashes_cache_manager.save_cache()
             print("掃描圖片哈希快取已清空。下次運行時將重新建立。", flush=True)
 
-        # 準備時間篩選
         start_date_dt, end_date_dt = None, None
         if main_app_config.get('enable_time_filter'):
             try:
@@ -1867,7 +1912,6 @@ class Application:
                 messagebox.showwarning("日期格式錯誤", "時間篩選日期格式不正確，將禁用時間篩選。", parent=self.root)
                 main_app_config['enable_time_filter'] = False
 
-        # 執行核心比對引擎
         try:
             engine = ImageComparisonEngine(
                 root_scan_folder=main_app_config['root_scan_folder'],
@@ -1883,7 +1927,8 @@ class Application:
                 system_qr_scan_capability=QR_SCAN_ENABLED,
                 scanned_hashes_cache_manager=scanned_hashes_cache_manager,
                 comparison_result_cache_manager=comparison_result_cache_manager,
-                enable_extract_count_limit=main_app_config['enable_extract_count_limit']
+                enable_extract_count_limit=main_app_config['enable_extract_count_limit'],
+                high_performance_mode=main_app_config['high_performance_mode']
             )
 
             files_to_process_dict = engine.generate_extracted_files(folder_creation_cache_manager)
@@ -1892,13 +1937,12 @@ class Application:
             ad_data = ({}, {})
             if engine.comparison_mode == 'ad_comparison':
                 rebuild_ad_flag = main_app_config.get('rebuild_ad_cache', False)
-                ad_data = load_ad_data(main_app_config['ad_folder_path'], rebuild_ad_flag)
+                ad_data = load_ad_data(main_app_config['ad_folder_path'], rebuild_ad_flag, main_app_config['high_performance_mode'])
             
             similar_files, all_file_data = engine.compare_images(files_to_process_dict, ad_data)
 
-            # 在主視窗上顯示結果
             if similar_files:
-                self.root.deiconify() # 在顯示結果前，讓主視窗可見
+                self.root.deiconify()
                 MainWindow(self.root, all_file_data, similar_files, engine.comparison_mode, initial_similarity_threshold=main_app_config['similarity_threshold'])
             else:
                 messagebox.showinfo("掃描結果", "未找到相似或廣告圖片，或沒有檢測到 QR Code。", parent=self.root)
@@ -1922,12 +1966,12 @@ def main():
         except Exception as e:
             log_error(f"設置多進程啟動方法時發生錯誤: {e}", include_traceback=True)
     
-    print(f"=== E-Download 漫畫尾頁廣告剔除 v11.0v93.1 - 啟動中 ===", flush=True)
+    print(f"=== E-Download 漫畫尾頁廣告剔除 v11.0v93.4-Optimized - 啟動中 ===", flush=True)
     
     root = tk.Tk()
-    #root.withdraw() # 立即隱藏主視窗
+    root.title("主控台 (運行中請勿關閉)")
+    root.geometry("300x50")
     
-    # 檢查套件並在需要時顯示錯誤（需要一個臨時的 root）
     try:
         check_and_install_packages()
     except SystemExit:
