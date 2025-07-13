@@ -677,17 +677,15 @@ class ImageComparisonEngine:
 
         print(f"啟動圖片比對，模式: {self.comparison_mode}", flush=True)
         
-        # 【方案一核心優化】預先計算哈希差異閾值 (整數)
+        # 【性能優化】預先計算哈希差異閾值 (整數)，替換浮點數運算
         threshold_diff = int((100 - self.similarity_threshold) / 100.0 * 64)
 
         if self.comparison_mode == "ad_comparison":
             if not self.ad_hashes_cache:
                 print("沒有可用的廣告圖片哈希值進行比對。", flush=True)
                 return [], all_file_data
-            # 【修改】傳遞整數閾值
             similar_files = self._compare_with_ads(threshold_diff)
         elif self.comparison_mode == "mutual_comparison":
-            # 【修改】傳遞整數閾值
             similar_files = self._compare_mutually(threshold_diff)
         elif self.comparison_mode == "qr_detection":
              if self.system_qr_scan_capability:
@@ -729,11 +727,15 @@ class ImageComparisonEngine:
                     cache_hits += 1
                 else:
                     diff = target_phash - ad_phash
-                    similarity = (1 - diff / 64) * 100 
-                    self.comparison_result_cache_manager.update_result(target_path, ad_path, similarity)
-                    
+                    # 【性能優化】先用整數比較，通過後再計算百分比
                     if diff <= threshold_diff:
+                        similarity = (1 - diff / 64) * 100 
                         found_similar.append((target_path, ad_path, similarity))
+                        self.comparison_result_cache_manager.update_result(target_path, ad_path, similarity)
+                    else:
+                        # 對於不相似的，也快取一個低值，避免重複計算
+                        self.comparison_result_cache_manager.update_result(target_path, ad_path, 0)
+
 
             if (i + 1) % progress_interval == 0 or (i + 1) == len(self.target_file_data):
                 print(f"  已比對 {i + 1}/{len(self.target_file_data)} 個目標圖片...", flush=True)
@@ -764,6 +766,7 @@ class ImageComparisonEngine:
                 if not phash2: continue
 
                 diff = phash1 - phash2
+                # 【性能優化】先用整數比較，通過後再計算百分比
                 if diff <= threshold_diff:
                     similarity = (1 - diff / 64) * 100
                     found_similar.append((path1, path2, similarity))
@@ -1431,7 +1434,7 @@ class MainWindow:
             else:
                 source_copy_tuple = (group_key, group_key, 100.0)
                 display_children = [source_copy_tuple] + children
-                item_count += len(display_children) # Corrected from +1
+                item_count += len(display_children)
 
             parent_data = self.all_file_data.get(group_key, {})
             parent_size_val = parent_data.get('size')
