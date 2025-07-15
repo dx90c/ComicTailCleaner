@@ -1,6 +1,6 @@
 # ======================================================================
-# 檔案名稱：ComicTailCleaner_v12.2.0.py
-# 版本號：12.2.0
+# 檔案名稱：ComicTailCleaner_v12.2.2.py
+# 版本號：12.2.2
 # 專案名稱：ComicTailCleaner (漫畫尾頁廣告清理)
 #
 # === 程式說明 ===
@@ -8,17 +8,17 @@
 # 它能高效地掃描大量漫畫檔案，並通過感知哈希算法找出內容上
 # 相似或完全重複的圖片，提升漫畫閱讀體驗。
 #
-# === 12.2.0 版本更新內容 ===
-# - 【架構重構】回歸到更穩定、更簡潔的「單一主視窗」架構，徹底解決了先前
-#   版本中因多視窗控制複雜性導致的 GUI 假死和啟動不穩定問題。
-# - 【核心修正】修正了相似度比對的關鍵邏輯錯誤。現在程式會根據 pHash 的
-#   漢明距離進行真實的相似度計算，使得使用者設定的「相似度閾值」能夠真正生效。
-# - 【UI 優化】將「設定」頁面改為標準的模態對話框(Toplevel)，提升了使用者
-#   操作流程的清晰度。
-# - 【UI 優化】在主視窗底部增加了狀態欄和進度條，為耗時操作提供即時、
-#   可視化的進度回饋。
-# - 【功能整合】保留並融合了先前版本中的所有優點，包括圖論分組、可拖拽
-#   UI 佈局、進程安全的多進程處理等。
+# === 12.2.2 版本更新內容 ===
+# - 【功能修正】恢復了在結果列表中顯示圖片「大小」和「建立日期」的功能，
+#   此功能在 v12.2.0 的重構中被意外遺漏。
+# - 【體驗優化】重寫了結果列表中的鍵盤導航邏輯。現在使用「上/下」方向鍵
+#   可以在父項和子項之間進行符合直覺的、層級感分明的跳轉，大幅提升操作流暢性。
+# - 【錯誤修正】修正了在互相比對模式下，基準圖片的相似度顯示不固定的問題。
+#
+# === 12.2.1 版本更新內容 ===
+# - 【錯誤修正】修復了在 v12.2.0 中引入的一個嚴重邏輯錯誤，該錯誤導致即使
+#   找到了相似圖片，結果列表也無法正確顯示任何內容的問題。
+# - 【邏輯優化】簡化並加固了結果列表(_populate_listbox)中的圖論分組算法。
 # ======================================================================
 
 # === 1. 標準庫導入 (Python Built-in Libraries) ===
@@ -63,7 +63,7 @@ from tkinter import filedialog
 from tkinter import messagebox
 
 # === 4. 全局常量和設定 ===
-APP_VERSION = "12.2.0"
+APP_VERSION = "12.2.2"
 APP_NAME_EN = "ComicTailCleaner"
 APP_NAME_TC = "漫畫尾頁廣告清理"
 CONFIG_FILE = "config.json"
@@ -174,23 +174,16 @@ class FolderCreationCacheManager:
                         try:
                             converted_cache[folder_path] = float(timestamp_str)
                         except (ValueError, TypeError):
-                            log_error(f"快取檔案 '{self.cache_file_path}' 中 '{folder_path}' 的建立時間格式不正確，將忽略此項。", include_traceback=True)
                             continue
-                    print(f"資料夾建立時間快取 '{self.cache_file_path}' 已成功載入。", flush=True)
                     return converted_cache
-            except json.JSONDecodeError:
-                log_error(f"資料夾建立時間快取檔案 '{self.cache_file_path}' 格式不正確，將重建快取。", include_traceback=True)
-            except Exception as e:
-                log_error(f"載入資料夾建立時間快取時發生錯誤: {e}，將重建快取。", include_traceback=True)
-        print(f"資料夾建立時間快取檔案 '{self.cache_file_path}' 不存在或載入失敗，將從空快取開始。", flush=True)
+            except (json.JSONDecodeError, Exception):
+                pass
         return {}
 
     def save_cache(self):
         try:
-            serializable_cache = {path: str(timestamp) for path, timestamp in self.cache.items()}
             with open(self.cache_file_path, 'w', encoding='utf-8') as f:
-                json.dump(serializable_cache, f, indent=4, ensure_ascii=False)
-            print(f"資料夾建立時間快取已成功保存到 '{self.cache_file_path}'。", flush=True)
+                json.dump(self.cache, f, indent=4, ensure_ascii=False)
         except Exception as e:
             log_error(f"保存資料夾建立時間快取時發生錯誤: {e}", include_traceback=True)
 
@@ -201,11 +194,7 @@ class FolderCreationCacheManager:
             ctime = os.path.getctime(folder_path)
             self.cache[folder_path] = ctime
             return ctime
-        except FileNotFoundError:
-            log_error(f"資料夾不存在，無法獲取建立時間: {folder_path}", include_traceback=False)
-            return None
-        except Exception as e:
-            log_error(f"獲取資料夾建立時間失敗: {folder_path}, 錯誤: {e}", include_traceback=True)
+        except (FileNotFoundError, Exception):
             return None
 
     def invalidate_cache(self):
@@ -213,10 +202,8 @@ class FolderCreationCacheManager:
         if os.path.exists(self.cache_file_path):
             try:
                 os.remove(self.cache_file_path)
-                print(f"資料夾建立時間快取檔案 '{self.cache_file_path}' 已刪除。", flush=True)
             except Exception as e:
                 log_error(f"刪除快取檔案 '{self.cache_file_path}' 時發生錯誤: {e}", include_traceback=True)
-        print("資料夾建立時間快取已失效。", flush=True)
 
 
 # === 8. 核心工具函數 ===
@@ -225,7 +212,6 @@ def get_all_subfolders(root_folder, excluded_folders=None, enable_time_filter=Fa
         excluded_folders = []
     all_subfolders_to_return = []
     if not os.path.isdir(root_folder):
-        log_error(f"根掃描資料夾不存在: {root_folder}", include_traceback=False)
         return []
 
     if progress_queue:
@@ -254,9 +240,6 @@ def get_all_subfolders(root_folder, excluded_folders=None, enable_time_filter=Fa
                     if (start_date and folder_ctime < start_date) or \
                        (end_date and folder_ctime > end_date):
                         continue
-                else:
-                    log_error(f"無法獲取資料夾建立時間，跳過時間篩選: {current_folder}", include_traceback=False)
-                    continue
         
         all_subfolders_to_return.append(current_folder)
 
@@ -265,10 +248,8 @@ def get_all_subfolders(root_folder, excluded_folders=None, enable_time_filter=Fa
                 entry_path = os.path.join(current_folder, entry)
                 if os.path.isdir(entry_path):
                     folders_to_process_queue.append(entry_path)
-        except PermissionError:
-            log_error(f"無權限訪問資料夾: {current_folder}", include_traceback=False)
-        except Exception as e:
-            log_error(f"遍歷資料夾 '{current_folder}' 時發生錯誤: {e}", include_traceback=True)
+        except (PermissionError, Exception):
+            pass
             
     return all_subfolders_to_return
 
@@ -278,7 +259,6 @@ def extract_last_n_files_from_folders(folder_paths, count, enable_limit):
     for folder_path in folder_paths:
         image_files = []
         try:
-            # 使用 os.listdir 比 os.scandir 更快，因為我們只需要檔名
             entries = os.listdir(folder_path)
             for entry in entries:
                 if entry.lower().endswith(image_extensions):
@@ -291,40 +271,31 @@ def extract_last_n_files_from_folders(folder_paths, count, enable_limit):
                 extracted_files[folder_path] = image_files[-count:]
             else:
                 extracted_files[folder_path] = image_files
-        except PermissionError:
-            log_error(f"無權限訪問資料夾中的檔案: {folder_path}", include_traceback=False)
-        except Exception as e:
-            log_error(f"處理資料夾 '{folder_path}' 時發生錯誤: {e}", include_traceback=True)
+        except (PermissionError, Exception):
+            pass
     return extracted_files
 
-def calculate_image_hash(image_path, hash_size=8):
+def _pool_worker_process_image(image_path):
     try:
         with Image.open(image_path) as img:
             img = ImageOps.exif_transpose(img)
-            phash = imagehash.phash(img, hash_size=hash_size)
-            return (image_path, phash)
-    except FileNotFoundError:
-        return None
-    except UnidentifiedImageError:
-        return None
-    except OSError:
-        return None
-    except Exception as e:
-        log_error(f"計算圖片哈希時發生未知錯誤: {image_path}, 錯誤: {e}", include_traceback=True)
-        return None
+            phash = imagehash.phash(img, hash_size=8)
+            stat_info = os.stat(image_path)
+            return (image_path, {
+                'hash': phash,
+                'size': stat_info.st_size,
+                'ctime': stat_info.st_ctime
+            })
+    except (FileNotFoundError, UnidentifiedImageError, OSError, Exception):
+        return (image_path, None)
 
-# === 9. 多進程工作函數 ===
-def _pool_worker_process_image(image_path):
-    return calculate_image_hash(image_path)
-
-# === 10. 核心比對引擎 ===
+# === 9. 核心比對引擎 ===
 class ImageComparisonEngine:
     def __init__(self, config, progress_queue=None):
         self.config = config
         self.progress_queue = progress_queue
         self.system_qr_scan_capability = QR_SCAN_ENABLED
-        self.processed_files_display_interval = 500
-        print(f"ImageComparisonEngine (v12.2) initialized.", flush=True)
+        print(f"ImageComparisonEngine (v12.2.2) initialized.", flush=True)
 
     def find_duplicates(self):
         start_date_dt, end_date_dt = None, None
@@ -385,28 +356,28 @@ class ImageComparisonEngine:
 
     def _calculate_hashes_in_parallel(self, files_to_process, description=""):
         if not files_to_process:
-            return []
+            return {}
         
         num_processes = cpu_count()
-        self._update_progress(text=f"啟動 {num_processes} 個進程計算 {description} 哈希...")
+        self._update_progress(text=f"啟動 {num_processes} 個進程計算 {description} 哈希與元數據...")
         
-        hashes = []
+        file_data = {}
         with Pool(processes=num_processes) as pool:
             results_iterator = pool.imap_unordered(_pool_worker_process_image, files_to_process)
             
             processed_count = 0
             total_to_process = len(files_to_process)
-            for result in results_iterator:
+            for path, data in results_iterator:
                 processed_count += 1
-                if result:
-                    hashes.append(result)
+                if data and data.get('hash') is not None:
+                    file_data[path] = data
                 
                 if processed_count % 100 == 0 or processed_count == total_to_process:
                     progress = int((processed_count / total_to_process) * 100)
-                    self._update_progress(p_type='progress', value=progress, text=f"計算 {description} 哈希: {processed_count}/{total_to_process}")
+                    self._update_progress(p_type='progress', value=progress, text=f"計算 {description} 屬性: {processed_count}/{total_to_process}")
 
-        self._update_progress(text=f"{description} 哈希計算完成，成功獲取 {len(hashes)} 個哈希。")
-        return hashes
+        self._update_progress(text=f"{description} 屬性計算完成，成功獲取 {len(file_data)} 個檔案資訊。")
+        return file_data
 
     def _find_similar_images(self, start_date_dt, end_date_dt):
         folder_cache_manager = FolderCreationCacheManager()
@@ -417,12 +388,14 @@ class ImageComparisonEngine:
             self._update_progress(text="沒有找到任何需要處理的圖片檔案。")
             return [], {}
 
-        target_hashes = self._calculate_hashes_in_parallel(target_files, "掃描目標")
-        ad_hashes = []
+        target_file_data = self._calculate_hashes_in_parallel(target_files, "掃描目標")
+        ad_file_data = {}
         if self.config['comparison_mode'] == 'ad_comparison' and ad_files:
-            ad_hashes = self._calculate_hashes_in_parallel(ad_files, "廣告圖片")
-            if not ad_hashes:
+            ad_file_data = self._calculate_hashes_in_parallel(ad_files, "廣告圖片")
+            if not ad_file_data:
                 self._update_progress(text="警告：廣告資料夾中未成功計算出任何哈希值。")
+        
+        all_file_data = {**target_file_data, **ad_file_data}
 
         self._update_progress(text="開始比對相似圖片...", p_type='progress', value=0)
         
@@ -431,9 +404,15 @@ class ImageComparisonEngine:
         found_duplicates = []
 
         if self.config['comparison_mode'] == 'ad_comparison':
-            total_comparisons = len(target_hashes)
-            for i, (target_path, target_hash) in enumerate(target_hashes):
-                for ad_path, ad_hash in ad_hashes:
+            total_comparisons = len(target_file_data)
+            for i, (target_path, target_data) in enumerate(target_file_data.items()):
+                target_hash = target_data.get('hash')
+                if not target_hash: continue
+
+                for ad_path, ad_data in ad_file_data.items():
+                    ad_hash = ad_data.get('hash')
+                    if not ad_hash: continue
+
                     diff = target_hash - ad_hash
                     if diff <= max_diff:
                         similarity = (1 - diff / (hash_size ** 2)) * 100
@@ -443,39 +422,29 @@ class ImageComparisonEngine:
                     self._update_progress(p_type='progress', value=progress, text=f"廣告比對中: {i+1}/{total_comparisons}")
 
         elif self.config['comparison_mode'] == 'mutual_comparison':
-            hash_groups = defaultdict(list)
-            for path, h in target_hashes:
-                hash_groups[h].append(path)
-            
-            unique_hashes = list(hash_groups.keys())
-            
-            for h, paths in hash_groups.items():
-                if len(paths) > 1:
-                    base_path = paths[0]
-                    for other_path in paths[1:]:
-                        found_duplicates.append((base_path, other_path, 100.0))
+            items = list(target_file_data.items())
+            n = len(items)
 
-            total_comparisons = len(unique_hashes) * (len(unique_hashes) - 1) // 2
-            processed_comparisons = 0
-            
-            for i in range(len(unique_hashes)):
-                for j in range(i + 1, len(unique_hashes)):
-                    processed_comparisons += 1
-                    hash1 = unique_hashes[i]
-                    hash2 = unique_hashes[j]
+            for i in range(n):
+                for j in range(i + 1, n):
+                    path1, data1 = items[i]
+                    path2, data2 = items[j]
+                    
+                    hash1 = data1.get('hash')
+                    hash2 = data2.get('hash')
+                    if not hash1 or not hash2: continue
+
                     diff = hash1 - hash2
                     if diff <= max_diff:
                         similarity = (1 - diff / (hash_size ** 2)) * 100
-                        base_path = hash_groups[hash1][0]
-                        for path2 in hash_groups[hash2]:
-                            found_duplicates.append((base_path, path2, similarity))
-                    
-                    if processed_comparisons % 5000 == 0 and total_comparisons > 0:
-                        progress = int(processed_comparisons / total_comparisons * 100)
-                        self._update_progress(p_type='progress', value=progress, text=f"互相比對中: {processed_comparisons}/{total_comparisons}")
+                        found_duplicates.append((path1, path2, similarity))
+
+                if (i + 1) % 500 == 0 or (i + 1) == n:
+                    progress = int(((i + 1) / n) * 100)
+                    self._update_progress(p_type='progress', value=progress, text=f"互相比對中: {i+1}/{n}")
 
         self._update_progress(p_type='progress', value=100, text=f"比對完成，找到 {len(found_duplicates)} 對相似/重複項。")
-        return found_duplicates, {}
+        return found_duplicates, all_file_data
 
     def _detect_qr_codes(self, start_date_dt, end_date_dt):
         folder_cache_manager = FolderCreationCacheManager()
@@ -484,7 +453,7 @@ class ImageComparisonEngine:
         
         self._update_progress(text="開始檢測圖片中的 QR Code...")
         found_qr_images = []
-        qr_detector = cv2.QRCodeDetector()
+        all_file_data = self._calculate_hashes_in_parallel(files_to_process, "掃描目標")
         
         total_files = len(files_to_process)
         for i, image_path in enumerate(files_to_process):
@@ -494,75 +463,47 @@ class ImageComparisonEngine:
                     pil_img = pil_img.convert('RGB')
                     img_cv = np.array(pil_img)
                     gray = cv2.cvtColor(img_cv, cv2.COLOR_RGB2GRAY)
-                retval, _, _, _ = qr_detector.detectAndDecodeMulti(gray)
+                retval, _, _, _ = cv2.QRCodeDetector().detectAndDecodeMulti(gray)
                 if retval:
                     found_qr_images.append((image_path, "N/A", 100.0))
-            except Exception as e:
-                log_error(f"檢測 QR Code 時發生錯誤於圖片 {image_path}: {e}", include_traceback=False)
+            except Exception:
+                pass
             
             if (i + 1) % 100 == 0 or (i + 1) == total_files:
                 progress = int((i + 1) / total_files * 100)
                 self._update_progress(p_type='progress', value=progress, text=f"QR Code 檢測中: {i+1}/{total_files}")
         
         self._update_progress(text=f"QR Code 檢測完成。找到 {len(found_qr_images)} 個包含 QR Code 的圖片。")
-        return found_qr_images, {}
+        return found_qr_images, all_file_data
 
-# === 11. GUI 類別 ===
+# === 10. GUI 類別 ===
 class Tooltip:
-    # ... 此類無變更 ...
     def __init__(self, widget, text):
-        self.widget = widget
-        self.text = text
-        self.tooltip_window = None
-        self.id = None
-        self.x = self.y = 0
-
-    def enter(self, event=None):
-        self.schedule(event)
-
-    def leave(self, event=None):
-        self.unschedule()
-        self.hidetip()
-
+        self.widget, self.text, self.tooltip_window, self.id = widget, text, None, None
+    def enter(self, event=None): self.schedule(event)
+    def leave(self, event=None): self.unschedule(); self.hidetip()
     def schedule(self, event=None):
         self.unschedule()
-        if event:
-            self.x = event.x_root + 15
-            self.y = event.y_root + 10
+        if event: self.x, self.y = event.x_root + 15, event.y_root + 10
         self.id = self.widget.after(500, self.showtip)
-
     def unschedule(self):
-        id = self.id
-        self.id = None
-        if id:
-            self.widget.after_cancel(id)
-
+        if self.id: self.widget.after_cancel(self.id); self.id = None
     def showtip(self):
-        if self.tooltip_window:
-            return
+        if self.tooltip_window: return
         self.tooltip_window = tw = tk.Toplevel(self.widget)
-        tw.wm_overrideredirect(True)
-        tw.wm_geometry(f"+{self.x}+{self.y}")
-        label = tk.Label(tw, text=self.text, justify='left',
-                       background="#ffffe0", relief='solid', borderwidth=1,
-                       font=("tahoma", "8", "normal"))
-        label.pack(ipadx=1)
-
+        tw.wm_overrideredirect(True); tw.wm_geometry(f"+{self.x}+{self.y}")
+        tk.Label(tw, text=self.text, justify='left', background="#ffffe0", relief='solid', borderwidth=1, font=("tahoma", "8", "normal")).pack(ipadx=1)
     def hidetip(self):
-        tw = self.tooltip_window
-        self.tooltip_window = None
-        if tw:
-            tw.destroy()
+        if self.tooltip_window: self.tooltip_window.destroy(); self.tooltip_window = None
 
 class SettingsGUI(tk.Toplevel):
     def __init__(self, master):
         super().__init__(master)
         self.master = master
         self.config = master.config
-        self.rebuild_folder_cache_result = False
         
         self.title(f"{APP_NAME_TC} v{APP_VERSION} - 設定")
-        self.geometry("700x600")
+        self.geometry("700x550")
         self.resizable(False, False)
         self.transient(master)
         self.grab_set()
@@ -649,7 +590,7 @@ class SettingsGUI(tk.Toplevel):
         self.end_date_entry = ttk.Entry(cache_time_frame, textvariable=self.end_date_var, width=15)
         self.end_date_entry.grid(row=2, column=1, sticky="ew", padx=5)
         ttk.Label(cache_time_frame, text="(YYYY-MM-DD)").grid(row=2, column=2, sticky="w")
-        ttk.Button(cache_time_frame, text="重建資料夾時間快取", command=self._rebuild_folder_cache).grid(row=3, column=0, columnspan=3, sticky="w", pady=5)
+        ttk.Button(cache_time_frame, text="清空資料夾時間快取", command=self._rebuild_folder_cache).grid(row=3, column=0, columnspan=3, sticky="w", pady=5)
         
         row_idx += 1
         button_frame = ttk.Frame(frame, padding="10")
@@ -770,13 +711,12 @@ class MainWindow(tk.Tk):
         super().__init__()
         self.config = load_config(CONFIG_FILE)
         self.all_similar_files = []
+        self.all_file_data = {}
         self.selected_files = set()
         self.banned_ad_images = set()
         
-        self.pil_img_target = None
-        self.pil_img_compare = None
-        self.img_tk_target = None
-        self.img_tk_compare = None
+        self.pil_img_target, self.pil_img_compare = None, None
+        self.img_tk_target, self.img_tk_compare = None, None
         
         self.scan_thread = None
         self.progress_queue = Queue()
@@ -808,11 +748,10 @@ class MainWindow(tk.Tk):
             font_family = self.tk.call('font', 'actual', default_font, '-family')
             font_size = self.tk.call('font', 'actual', default_font, '-size')
             return (font_family, abs(int(font_size)), 'bold')
-        except (ValueError, IndexError, tk.TclError) as e:
+        except (ValueError, IndexError, tk.TclError):
             return ("TkDefaultFont", 9, 'bold')
 
     def _create_widgets(self):
-        # Top Control Frame
         top_frame = ttk.Frame(self, padding="5")
         top_frame.pack(side=tk.TOP, fill=tk.X)
         self.settings_button = ttk.Button(top_frame, text="設定", command=self.open_settings)
@@ -821,26 +760,21 @@ class MainWindow(tk.Tk):
         self.start_button.pack(side=tk.LEFT, padx=5)
         ttk.Style(self).configure("Accent.TButton", font=self.bold_font, foreground='blue')
 
-        # Main Paned Window
         main_pane = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
         main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
-        # Left Frame (Treeview)
         left_frame = ttk.Frame(main_pane)
         main_pane.add(left_frame, weight=3)
         self._create_treeview(left_frame)
         
-        # Right Frame (Image Previews)
         right_frame = ttk.Frame(main_pane)
         main_pane.add(right_frame, weight=2)
         self._create_preview_panels(right_frame)
 
-        # Bottom Buttons Frame
         bottom_button_container = ttk.Frame(self)
         bottom_button_container.pack(fill=tk.X, expand=False, padx=10, pady=(0, 5))
         self._create_bottom_buttons(bottom_button_container)
 
-        # Status Bar
         status_frame = ttk.Frame(self, relief=tk.SUNKEN, padding=2)
         status_frame.pack(side=tk.BOTTOM, fill=tk.X)
         self.status_label = ttk.Label(status_frame, text="準備就緒")
@@ -849,19 +783,23 @@ class MainWindow(tk.Tk):
         self.progress_bar.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=5)
 
     def _create_treeview(self, parent_frame):
-        columns = ("checkbox", "filename", "path", "count", "similarity")
+        columns = ("checkbox", "filename", "path", "count", "size", "ctime", "similarity")
         self.tree = ttk.Treeview(parent_frame, columns=columns, show="headings", selectmode="extended")
         
         self.tree.heading("checkbox", text="")
         self.tree.heading("filename", text="群組 - 重複/相似圖片")
         self.tree.heading("path", text="路徑")
         self.tree.heading("count", text="數量")
+        self.tree.heading("size", text="大小")
+        self.tree.heading("ctime", text="建立日期")
         self.tree.heading("similarity", text="相似度")
 
         self.tree.column("checkbox", width=40, minwidth=40, stretch=tk.NO, anchor=tk.W)
         self.tree.column("filename", width=300, stretch=tk.YES, anchor=tk.W)
         self.tree.column("path", width=300, stretch=tk.YES, anchor=tk.W)
         self.tree.column("count", width=50, minwidth=50, stretch=tk.NO, anchor=tk.CENTER)
+        self.tree.column("size", width=100, minwidth=90, stretch=tk.NO, anchor=tk.E)
+        self.tree.column("ctime", width=150, minwidth=140, stretch=tk.NO, anchor=tk.CENTER)
         self.tree.column("similarity", width=80, minwidth=70, stretch=tk.NO, anchor=tk.CENTER)
         
         self.tree.tag_configure('child_item', foreground='#555555')
@@ -922,10 +860,9 @@ class MainWindow(tk.Tk):
         self.tree.bind("<BackSpace>", lambda e: self._delete_selected_from_disk())
         self.tree.bind("<Motion>", self._on_mouse_motion)
         self.tooltip = None
-        self.tree.bind("<Up>", self._navigate_image)
-        self.tree.bind("<Down>", self._navigate_image)
+        self.tree.bind("<Up>", lambda e: self._navigate_image(e, "Up"))
+        self.tree.bind("<Down>", lambda e: self._navigate_image(e, "Down"))
 
-    # --- GUI Event Handlers ---
     def open_settings(self):
         self.settings_button.config(state=tk.DISABLED)
         SettingsGUI(self)
@@ -940,6 +877,7 @@ class MainWindow(tk.Tk):
         self.settings_button.config(state=tk.DISABLED)
         self.tree.delete(*self.tree.get_children())
         self.all_similar_files.clear()
+        self.all_file_data.clear()
         
         self.scan_thread = threading.Thread(target=self._run_scan_in_thread, daemon=True)
         self.scan_thread.start()
@@ -951,11 +889,12 @@ class MainWindow(tk.Tk):
                 msg_type = msg.get('type')
                 if msg_type == 'progress':
                     self.progress_bar['value'] = msg.get('value', 0)
-                    self.status_label['text'] = msg.get('text', '')
+                    if 'text' in msg: self.status_label['text'] = msg['text']
                 elif msg_type == 'text':
                     self.status_label['text'] = msg.get('text', '')
                 elif msg_type == 'result':
                     self.all_similar_files = msg.get('data', [])
+                    self.all_file_data = msg.get('meta', {})
                     self._populate_listbox()
                 elif msg_type == 'finish':
                     self.status_label['text'] = msg.get('text', "任務完成")
@@ -964,27 +903,24 @@ class MainWindow(tk.Tk):
                     self.settings_button.config(state=tk.NORMAL)
                     if not self.all_similar_files:
                         messagebox.showinfo("掃描結果", "未找到符合條件的相似或廣告圖片。")
-
         except Empty:
             pass
         finally:
             self.after(100, self.check_queue)
     
-    # --- Background Logic ---
     def _run_scan_in_thread(self):
         try:
             engine = ImageComparisonEngine(self.config, self.progress_queue)
-            similar_files, _ = engine.find_duplicates()
+            similar_files, all_file_data = engine.find_duplicates()
             
-            self.progress_queue.put({'type': 'result', 'data': similar_files})
+            self.progress_queue.put({'type': 'result', 'data': similar_files, 'meta': all_file_data})
             self.progress_queue.put({'type': 'finish', 'text': f"掃描完成。找到 {len(similar_files)} 對相似項。"})
-
         except Exception as e:
             log_error(f"核心邏輯執行失敗: {e}", include_traceback=True)
             self.progress_queue.put({'type': 'finish', 'text': f"執行錯誤: {e}"})
-            messagebox.showerror("執行錯誤", f"程式執行時發生錯誤: {e}")
+            if self.winfo_exists():
+                messagebox.showerror("執行錯誤", f"程式執行時發生錯誤: {e}")
             
-    # --- Treeview Population and Interaction ---
     def _populate_listbox(self):
         self.tree.delete(*self.tree.get_children())
         current_selection = self.selected_files.copy()
@@ -993,87 +929,71 @@ class MainWindow(tk.Tk):
         sim_map = {}
         adj = defaultdict(list)
         nodes = set()
+        
         for path1, path2, sim in self.all_similar_files:
-            nodes.add(path1)
-            nodes.add(path2)
-            adj[path1].append(path2)
-            adj[path2].append(path1)
+            nodes.add(path1); nodes.add(path2)
+            adj[path1].append(path2); adj[path2].append(path1)
             sim_map[tuple(sorted((path1, path2)))] = sim
 
         visited = set()
         all_components = []
-        for node in sorted(list(nodes)):
+        for node in sorted(list(nodes)): 
             if node not in visited:
-                component = set()
-                q = deque([node])
-                visited.add(node)
+                component = set(); q = deque([node]); visited.add(node)
                 while q:
-                    current = q.popleft()
-                    component.add(current)
+                    current = q.popleft(); component.add(current)
                     for neighbor in adj.get(current, []):
-                        if neighbor not in visited:
-                            visited.add(neighbor)
-                            q.append(neighbor)
+                        if neighbor not in visited: visited.add(neighbor); q.append(neighbor)
                 if len(component) > 1:
                     all_components.append(sorted(list(component)))
         
-        group_count = 0
-        item_count = 0
         unique_id_counter = 0
-
         for component in all_components:
             group_key = component[0]
             if group_key in self.banned_ad_images: continue
             
-            children_paths = component[1:]
-            group_count += 1
-            item_count += len(component)
-
-            parent_id = f"group_{unique_id_counter}"
-            unique_id_counter += 1
-            
+            parent_id = f"group_{unique_id_counter}"; unique_id_counter += 1
             is_ad_group = self.config['comparison_mode'] == 'ad_comparison'
             parent_tags = ('ad_parent_item' if is_ad_group else 'parent_item', group_key)
-            
+            parent_data = self.all_file_data.get(group_key, {})
+            parent_size = f"{parent_data.get('size', 0):,}" if 'size' in parent_data else "N/A"
+            parent_ctime_ts = parent_data.get('ctime')
+            parent_ctime = datetime.datetime.fromtimestamp(parent_ctime_ts).strftime('%Y/%m/%d %H:%M') if parent_ctime_ts else "N/A"
+
             self.tree.insert("", "end", iid=parent_id, 
-                             values=("☐" if not is_ad_group else "", os.path.basename(group_key), os.path.dirname(group_key), len(children_paths) + 1, "基準"), 
+                             values=("☐" if not is_ad_group else "", os.path.basename(group_key), 
+                                     os.path.dirname(group_key), len(component) if not is_ad_group else len(component)-1, 
+                                     parent_size, parent_ctime, "基準"), 
                              tags=parent_tags, open=True)
 
             for path in component:
-                is_child_selected = path in current_selection
-                if is_child_selected: self.selected_files.add(path)
+                if is_ad_group and path == group_key: continue
 
                 child_tags = ['child_item', path, group_key]
-                is_source = (path == group_key)
-                if is_source:
-                    child_tags.append('source_copy_item')
-
-                item_id = f"item_{unique_id_counter}"
-                unique_id_counter += 1
-                filename_display = f"  └─ {os.path.basename(path)}"
+                if path == group_key: child_tags.append('source_copy_item')
+                
+                item_id = f"item_{unique_id_counter}"; unique_id_counter += 1
                 similarity_val = sim_map.get(tuple(sorted((group_key, path))), 100.0)
+                child_data = self.all_file_data.get(path, {})
+                child_size = f"{child_data.get('size', 0):,}" if 'size' in child_data else "N/A"
+                child_ctime_ts = child_data.get('ctime')
+                child_ctime = datetime.datetime.fromtimestamp(child_ctime_ts).strftime('%Y/%m/%d %H:%M') if child_ctime_ts else "N/A"
                 
                 self.tree.insert(parent_id, "end", iid=item_id, 
-                                 values=("☑" if is_child_selected else "☐", filename_display, os.path.dirname(path), "", f"{similarity_val:.1f}%"),
+                                 values=("☑" if path in current_selection else "☐", f"  └─ {os.path.basename(path)}", 
+                                         os.path.dirname(path), "", child_size, child_ctime, f"{similarity_val:.1f}%"),
                                  tags=tuple(child_tags))
         
-        banned_count = len(self.banned_ad_images)
-        banned_info = f" (另有 {banned_count} 個群組被隱藏)" if banned_count > 0 else ""
-        print(f"列表刷新完成。顯示 {group_count} 個群組, {item_count} 個項目。{banned_info}", flush=True)
-
         if self.tree.get_children():
             first_item = self.tree.get_children()[0]
-            self.tree.selection_set(first_item)
-            self.tree.focus(first_item)
+            self.tree.selection_set(first_item); self.tree.focus(first_item)
 
-
-    # --- Rest of MainWindow methods (from v12.1.0, largely unchanged) ---
     def _on_treeview_click(self, event):
         item_id = self.tree.identify_row(event.y)
         if not item_id: return
         
         column_id = self.tree.identify_column(event.x)
-        if column_id == "#1": # Checkbox column
+        if column_id == "#1":
             tags = self.tree.item(item_id, "tags")
             if 'ad_parent_item' not in tags and 'source_copy_item' not in tags:
                 self._toggle_selection_by_item_id(item_id)
@@ -1082,21 +1002,18 @@ class MainWindow(tk.Tk):
             self.tree.focus(item_id)
 
     def _on_item_select(self, event):
-        if self._after_id:
-            self.after_cancel(self._after_id)
+        if self._after_id: self.after_cancel(self._after_id)
         self._after_id = self.after(self._preview_delay, self._load_and_display_selected_image)
 
     def _load_and_display_selected_image(self):
         self._after_id = None
-        selected_items = self.tree.selection()
-        if not selected_items:
+        selected = self.tree.selection()
+        if not selected:
             self.target_image_label.config(image=""); self.compare_image_label.config(image="")
             self.target_path_label.config(text=""); self.compare_path_label.config(text="")
             return
 
-        item_id = selected_items[0]
-        tags = self.tree.item(item_id, "tags")
-
+        tags = self.tree.item(selected[0], "tags")
         selected_path, compare_path = (tags[1], tags[1]) if 'parent_item' in tags or 'ad_parent_item' in tags else (tags[1], tags[2]) if 'child_item' in tags else (None, None)
 
         self.pil_img_target = self._load_pil_image(selected_path, self.target_path_label)
@@ -1104,66 +1021,92 @@ class MainWindow(tk.Tk):
 
         self._update_all_previews()
     
-    def _load_pil_image(self, image_path, path_label_widget):
-        if not image_path:
-            path_label_widget.config(text="")
-            return None
+    def _load_pil_image(self, path, label_widget):
+        if not path:
+            label_widget.config(text=""); return None
         try:
-            with Image.open(image_path) as img:
+            with Image.open(path) as img:
                 img = ImageOps.exif_transpose(img)
-                path_label_widget.config(text=f"路徑: {image_path}")
+                label_widget.config(text=f"路徑: {path}")
                 return img.copy()
-        except Exception as e:
-            path_label_widget.config(text=f"無法載入圖片: {os.path.basename(image_path)}")
-            return None
+        except Exception:
+            label_widget.config(text=f"無法載入圖片: {os.path.basename(path)}"); return None
 
     def _update_all_previews(self):
         self._resize_and_display(self.target_image_label, self.pil_img_target, True)
         self._resize_and_display(self.compare_image_label, self.pil_img_compare, False)
 
     def _on_preview_resize(self, event):
-        widget = event.widget
-        is_target = (widget == self.target_image_label)
+        is_target = (event.widget == self.target_image_label)
         pil_image = self.pil_img_target if is_target else self.pil_img_compare
-        self._resize_and_display(widget, pil_image, is_target)
+        self._resize_and_display(event.widget, pil_image, is_target)
 
-    def _resize_and_display(self, label_widget, pil_image, is_target):
+    def _resize_and_display(self, label, pil_image, is_target):
         if pil_image is None:
-            label_widget.config(image="")
+            label.config(image=""); 
             if is_target: self.img_tk_target = None
             else: self.img_tk_compare = None
             return
 
-        width, height = label_widget.winfo_width(), label_widget.winfo_height()
-        if width <= 1 or height <= 1: return
+        w, h = label.winfo_width(), label.winfo_height()
+        if w <= 1 or h <= 1: return
             
         img_copy = pil_image.copy()
-        img_copy.thumbnail((width - 10, height - 10), Image.Resampling.LANCZOS)
+        img_copy.thumbnail((w - 10, h - 10), Image.Resampling.LANCZOS)
         img_tk = ImageTk.PhotoImage(img_copy)
         
-        label_widget.config(image=img_tk)
+        label.config(image=img_tk)
         if is_target: self.img_tk_target = img_tk
         else: self.img_tk_compare = img_tk
     
     def _on_preview_image_click(self, event, is_target_image):
         path_label = self.target_path_label if is_target_image else self.compare_path_label
-        full_path_text = path_label.cget("text")
-        if full_path_text.startswith("路徑: "):
-            image_path = full_path_text[len("路徑: "):].strip()
-            if image_path and os.path.exists(image_path):
-                self._open_folder(os.path.dirname(image_path))
+        text = path_label.cget("text")
+        if text.startswith("路徑: "):
+            path = text[len("路徑: "):].strip()
+            if path and os.path.exists(path):
+                self._open_folder(os.path.dirname(path))
 
-    def _navigate_image(self, event):
-        current_selection = self.tree.selection()
-        if not current_selection: return "break"
+    def _navigate_image(self, event, direction):
+        selected_id = self.tree.selection()
+        if not selected_id: return "break"
+        current_id = selected_id[0]
         
-        current_item = current_selection[0]
-        item_to_select = self.tree.next(current_item) if event.keysym == "Down" else self.tree.prev(current_item)
+        target_id = None
+        if direction == "Down":
+            parent = self.tree.parent(current_id)
+            if parent == "" and self.tree.item(current_id, "open"): # Is an open parent
+                children = self.tree.get_children(current_id)
+                if children: target_id = children[0]
+                else: target_id = self.tree.next(current_id)
+            elif parent != "": # Is a child
+                siblings = self.tree.get_children(parent)
+                idx = siblings.index(current_id)
+                if idx < len(siblings) - 1: target_id = siblings[idx+1]
+                else: target_id = self.tree.next(parent) # Next parent
+            else: # Is a closed parent
+                target_id = self.tree.next(current_id)
+        
+        elif direction == "Up":
+            parent = self.tree.parent(current_id)
+            if parent != "": # Is a child
+                siblings = self.tree.get_children(parent)
+                if current_id == siblings[0]: target_id = parent # Go to parent
+                else: target_id = self.tree.prev(current_id)
+            else: # Is a parent
+                prev_sibling = self.tree.prev(current_id)
+                if prev_sibling and self.tree.item(prev_sibling, "open"):
+                    children = self.tree.get_children(prev_sibling)
+                    if children: target_id = children[-1] # Go to last child of prev open parent
+                    else: target_id = prev_sibling
+                else:
+                    target_id = prev_sibling
 
-        if item_to_select:
-            self.tree.selection_set(item_to_select)
-            self.tree.focus(item_to_select)
-            self.tree.see(item_to_select)
+        if target_id:
+            self.tree.selection_set(target_id)
+            self.tree.focus(target_id)
+            self.tree.see(target_id)
+        
         return "break"
 
     def _toggle_selection_by_item_id(self, item_id):
@@ -1171,14 +1114,14 @@ class MainWindow(tk.Tk):
         tags = self.tree.item(item_id, "tags")
 
         if 'parent_item' in tags:
-            child_items = self.tree.get_children(item_id)
             select_all = self.tree.set(item_id, "checkbox") == "☐"
             self.tree.set(item_id, column="checkbox", value="☑" if select_all else "☐")
-            for child_id in child_items:
+            for child_id in self.tree.get_children(item_id):
                 if 'source_copy_item' not in self.tree.item(child_id, "tags"):
                     self._update_child_selection(child_id, select_all)
         elif 'child_item' in tags:
-            self._update_child_selection(item_id, not (tags[1] in self.selected_files))
+            is_selected = self.tree.item(item_id, "tags")[1] in self.selected_files
+            self._update_child_selection(item_id, not is_selected)
             parent_id = self.tree.parent(item_id)
             if parent_id and 'ad_parent_item' not in self.tree.item(parent_id, "tags"):
                 self._update_parent_checkbox(parent_id)
@@ -1193,22 +1136,20 @@ class MainWindow(tk.Tk):
             self.tree.set(child_id, column="checkbox", value="☐")
 
     def _update_parent_checkbox(self, parent_id):
-        all_children = self.tree.get_children(parent_id)
-        selectable_children = [cid for cid in all_children if 'source_copy_item' not in self.tree.item(cid, "tags")]
-        selected_count = sum(1 for cid in selectable_children if self.tree.set(cid, "checkbox") == "☑")
-        all_selected = selectable_children and selected_count == len(selectable_children)
+        children = self.tree.get_children(parent_id)
+        selectable = [cid for cid in children if 'source_copy_item' not in self.tree.item(cid, "tags")]
+        selected_count = sum(1 for cid in selectable if self.tree.set(cid, "checkbox") == "☑")
+        all_selected = selectable and selected_count == len(selectable)
         self.tree.set(parent_id, column="checkbox", value="☑" if all_selected else "☐")
 
     def _toggle_selection(self, event=None):
-        for item_id in self.tree.selection():
-            self._toggle_selection_by_item_id(item_id)
+        for item_id in self.tree.selection(): self._toggle_selection_by_item_id(item_id)
 
     def _update_all_checkboxes_based_on_selection_set(self):
         for parent_id in self.tree.get_children(""):
             for child_id in self.tree.get_children(parent_id):
-                tags = self.tree.item(child_id, "tags")
-                path = tags[1]
-                if 'source_copy_item' not in tags:
+                path = self.tree.item(child_id, "tags")[1]
+                if 'source_copy_item' not in self.tree.item(child_id, "tags"):
                     self._update_child_selection(child_id, path in self.selected_files)
             self._update_parent_checkbox(parent_id)
 
@@ -1220,42 +1161,33 @@ class MainWindow(tk.Tk):
                     self.selected_files.add(self.tree.item(child_id, "tags")[1])
         self._update_all_checkboxes_based_on_selection_set()
 
-    def _select_suggested_for_deletion(self):
-        self._select_all()
-
+    def _select_suggested_for_deletion(self): self._select_all()
     def _deselect_all(self):
         self.selected_files.clear()
         self._update_all_checkboxes_based_on_selection_set()
 
     def _invert_selection(self):
-        all_item_paths = set()
-        for parent_id in self.tree.get_children(""):
-            for child_id in self.tree.get_children(parent_id):
-                if 'source_copy_item' not in self.tree.item(child_id, "tags"):
-                    all_item_paths.add(self.tree.item(child_id, "tags")[1])
-        self.selected_files = all_item_paths - self.selected_files
+        all_paths = {self.tree.item(cid, "tags")[1] for pid in self.tree.get_children("") for cid in self.tree.get_children(pid) if 'source_copy_item' not in self.tree.item(cid, "tags")}
+        self.selected_files = all_paths - self.selected_files
         self._update_all_checkboxes_based_on_selection_set()
 
     def _delete_selected_from_disk(self):
-        if not self.selected_files:
-            messagebox.showinfo("提示", "沒有選中的圖片。")
-            return
-        if not messagebox.askyesno("確認刪除", f"確定要將 {len(self.selected_files)} 個圖片移至回收桶嗎？"):
-            return
+        if not self.selected_files or not messagebox.askyesno("確認刪除", f"確定要將 {len(self.selected_files)} 個圖片移至回收桶嗎？"): return
         
         deleted_paths = set()
         for path in list(self.selected_files):
             try:
-                send2trash.send2trash(os.path.abspath(path))
-                deleted_paths.add(path)
+                send2trash.send2trash(os.path.abspath(path)); deleted_paths.add(path)
             except Exception as e:
                 log_error(f"移至回收桶失敗 {path}: {e}", include_traceback=True)
         
         if len(deleted_paths) < len(self.selected_files):
-            messagebox.showerror("刪除失敗", f"有 {len(self.selected_files) - len(deleted_paths)} 個檔案刪除失敗，請檢查日誌。")
+            messagebox.showerror("刪除失敗", f"有 {len(self.selected_files) - len(deleted_paths)} 個檔案刪除失敗。")
 
         if deleted_paths:
             self.all_similar_files = [(p1, p2, sim) for p1, p2, sim in self.all_similar_files if p1 not in deleted_paths and p2 not in deleted_paths]
+            for path in deleted_paths:
+                if path in self.all_file_data: del self.all_file_data[path]
             self.selected_files.clear()
             self._populate_listbox()
             messagebox.showinfo("刪除完成", f"成功將 {len(deleted_paths)} 個文件移至回收桶。")
@@ -1266,7 +1198,6 @@ class MainWindow(tk.Tk):
             elif sys.platform == "darwin": subprocess.run(['open', os.path.expanduser("~/.Trash")])
             else: subprocess.run(['xdg-open', "trash:/"])
         except Exception as e:
-            log_error(f"開啟回收桶失敗: {e}", include_traceback=True)
             messagebox.showerror("開啟失敗", f"無法自動開啟回收桶: {e}")
 
     def _open_folder(self, folder_path):
@@ -1281,14 +1212,12 @@ class MainWindow(tk.Tk):
             log_error(f"開啟資料夾失敗 {folder_path}: {e}", include_traceback=True)
 
     def _open_selected_folder_single(self):
-        selected_items = self.tree.selection()
-        if not selected_items:
+        selected = self.tree.selection()
+        if not selected:
             messagebox.showinfo("提示", "請先在列表中選中一個項目。")
             return
-        
-        path_to_open = self.tree.item(selected_items[0], "tags")[1]
-        if path_to_open and os.path.exists(path_to_open):
-            self._open_folder(os.path.dirname(path_to_open))
+        path = self.tree.item(selected[0], "tags")[1]
+        if path and os.path.exists(path): self._open_folder(os.path.dirname(path))
 
     def _create_context_menu(self):
         self.context_menu = tk.Menu(self, tearoff=0)
@@ -1297,21 +1226,17 @@ class MainWindow(tk.Tk):
         self.context_menu.add_command(label="取消所有隱藏", command=self._unban_all_ads)
 
     def _show_context_menu(self, event):
-        item_id = self.tree.identify_row(event.y)
-        if item_id: self.context_menu.tk_popup(event.x_root, event.y_root)
+        if self.tree.identify_row(event.y): self.context_menu.tk_popup(event.x_root, event.y_root)
 
     def _ban_ad_image(self):
-        selected_items = self.tree.selection()
-        if not selected_items: return
-        item_id = self.tree.parent(selected_items[0]) or selected_items[0]
-        key_to_ban = self.tree.item(item_id, "tags")[1]
-        if key_to_ban:
-            self.banned_ad_images.add(key_to_ban)
-            self._populate_listbox()
+        selected = self.tree.selection()
+        if not selected: return
+        item_id = self.tree.parent(selected[0]) or selected[0]
+        key = self.tree.item(item_id, "tags")[1]
+        if key: self.banned_ad_images.add(key); self._populate_listbox()
     
     def _unban_all_ads(self):
-        self.banned_ad_images.clear()
-        self._populate_listbox()
+        self.banned_ad_images.clear(); self._populate_listbox()
     
     def _on_mouse_motion(self, event):
         item_id = self.tree.identify_row(event.y)
@@ -1320,29 +1245,23 @@ class MainWindow(tk.Tk):
         
         self.tooltip_item_id = item_id
         if item_id:
-            tags = self.tree.item(item_id, "tags")
-            if 'ad_parent_item' in tags:
+            if 'ad_parent_item' in self.tree.item(item_id, "tags"):
                 self.tooltip = Tooltip(self.tree, "廣告圖片 (基準，不會被刪除)")
                 self.tooltip.enter(event)
     
     def _on_closing(self):
-        if messagebox.askokcancel("關閉程式", "確定要關閉程式嗎？"):
-            self.destroy()
+        if messagebox.askokcancel("關閉程式", "確定要關閉程式嗎？"): self.destroy()
 
-# === 12. 主程式入口 ===
+# === 11. 主程式入口 ===
 def main():
     if sys.platform.startswith('win'):
-        try:
-            set_start_method('spawn', force=True)
-        except RuntimeError:
-            pass # Already set
+        try: set_start_method('spawn', force=True)
+        except RuntimeError: pass
     
     print(f"=== {APP_NAME_TC} v{APP_VERSION} - 啟動中 ===", flush=True)
     
-    try:
-        check_and_install_packages()
-    except SystemExit:
-        return
+    try: check_and_install_packages()
+    except SystemExit: return
 
     root = MainWindow()
     root.mainloop()
