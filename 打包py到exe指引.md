@@ -9,6 +9,7 @@
 1.  您的 Python 環境中已安裝 `pyinstaller`。
 2.  專案所需的所有 Python 套件皆已安裝 (例如：`Pillow`, `imagehash`, `opencv-python`, `numpy`, `scipy` 等)。
 3.  專案根目錄下存在一個乾淨的、不包含任何個人路徑的 `config.json` 預設設定檔。
+4.  主程式腳本已標準化命名為 `ComicTailCleaner.py`。
 
 ## 打包命令
 
@@ -21,7 +22,7 @@
 *   **缺點**：發布時需提供整個資料夾。
 
 ```cmd
-pyinstaller --noconfirm --clean --windowed --add-data "config.json;." --hidden-import=Pillow --hidden-import=imagehash --hidden-import=send2trash --hidden-import=cv2 --hidden-import=numpy --hidden-import=scipy --hidden-import=six --hidden-import=pywt --copy-metadata=Pillow --copy-metadata=imagehash --copy-metadata=send2trash --copy-metadata=opencv-python --copy-metadata=numpy --copy-metadata=scipy --copy-metadata=six --copy-metadata=PyWavelets --collect-all=imagehash --collect-all=scipy "ComicTailCleaner_v12.6.3.py"
+pyinstaller --noconfirm --clean --windowed --add-data "config.json;." --hidden-import=Pillow --hidden-import=imagehash --hidden-import=send2trash --hidden-import=cv2 --hidden-import=numpy --hidden-import=scipy --hidden-import=six --hidden-import=pywt --copy-metadata=Pillow --copy-metadata=imagehash --copy-metadata=send2trash --copy-metadata=opencv-python --copy-metadata=numpy --copy-metadata=scipy --copy-metadata=six --copy-metadata=PyWavelets --collect-all=imagehash --collect-all=scipy "ComicTailCleaner.py"
 ```
 
 ### 模式二：單檔案模式 (One-File)
@@ -31,7 +32,7 @@ pyinstaller --noconfirm --clean --windowed --add-data "config.json;." --hidden-i
 *   **缺點**：首次啟動速度較慢（因需在背景解壓縮）。
 
 ```cmd
-pyinstaller --noconfirm --clean --windowed --onefile --add-data "config.json;." --hidden-import=Pillow --hidden-import=imagehash --hidden-import=send2trash --hidden-import=cv2 --hidden-import=numpy --hidden-import=scipy --hidden-import=six --hidden-import=pywt --copy-metadata=Pillow --copy-metadata=imagehash --copy-metadata=send2trash --copy-metadata=opencv-python --copy-metadata=numpy --copy-metadata=scipy --copy-metadata=six --copy-metadata=PyWavelets --collect-all=imagehash --collect-all=scipy "ComicTailCleaner_v12.6.3.py"
+pyinstaller --noconfirm --clean --windowed --onefile --add-data "config.json;." --hidden-import=Pillow --hidden-import=imagehash --hidden-import=send2trash --hidden-import=cv2 --hidden-import=numpy --hidden-import=scipy --hidden-import=six --hidden-import=pywt --copy-metadata=Pillow --copy-metadata=imagehash --copy-metadata=send2trash --copy-metadata=opencv-python --copy-metadata=numpy --copy-metadata=scipy --copy-metadata=six --copy-metadata=PyWavelets --collect-all=imagehash --collect-all=scipy "ComicTailCleaner.py"
 ```
 
 ---
@@ -45,12 +46,12 @@ pyinstaller --noconfirm --clean --windowed --onefile --add-data "config.json;." 
 *   `--copy-metadata=...`：手動複製指定套件的 **元數據 (Metadata)**。這對於需要進行版本校驗的函式庫 (如 `pkg_resources`) 至關重要。
 *   `--collect-all=...`：以最強力的方式，完整收集一個模組所有相關的子模組、數據檔案、二進制檔等。特別適用於像 `scipy` 這類結構複雜的函式庫。
 *   `--clean`：在每次建置前，自動清除 PyInstaller 的快取及臨時檔案，以確保一個乾淨的打包環境。
-*   `"ComicTailCleaner_v12.6.3.py"`：您的主程式腳本檔名。未來發布新版本時，請記得更新此處的檔名。
+*   `"ComicTailCleaner.py"`：您的主程式腳本檔名。**我們已將其標準化，未來打包不同版本時，無需再修改此命令。**
 
 ## 使用流程
 
 1.  在命令提示字元 (CMD) 或終端機中，切換到本專案的根目錄。
-2.  確認 `config.json` 檔案已存在於根目錄。
+2.  確認 `config.json` 檔案與 `ComicTailCleaner.py` 已存在於根目錄。
 3.  複製您需要的模式（單目錄或單檔案）對應的完整命令。
 4.  在命令提示字元中貼上並執行。
 5.  打包成功後，在專案根目錄下會出現一個 `dist` 資料夾，您需要的檔案就在其中。
