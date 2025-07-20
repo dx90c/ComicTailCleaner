@@ -1,6 +1,6 @@
 # ======================================================================
-# 檔案名稱：ComicTailCleaner_v12.5.3.py
-# 版本號：12.5.3
+# 檔案名稱：ComicTailCleaner_v12.6.3.py
+# 版本號：12.6.3
 # 專案名稱：ComicTailCleaner (漫畫尾頁廣告清理)
 #
 # === 程式說明 ===
@@ -8,19 +8,16 @@
 # 它能高效地掃描大量漫畫檔案，並通過感知哈希算法找出內容上
 # 相似或完全重複的圖片，提升漫畫閱讀體驗。
 #
-# === 12.5.3 版本更新內容 ===
-# - 【混合模式逻辑修正】修正了混合QR模式下的一个关键逻辑漏洞，即当目标图片
-#   匹配到不含QR Code的广告时，不再创建多余的匹配记录，从而避免了同一张
-#   图片重复出现在不同结果分组中的问题。
+# === 12.6.3 版本更新內容 ===
+# - 【核心 Bug 修正】重構了快取保存邏輯，採用“先寫入臨時檔再替換”的安全策略
+#   並加入重試機制，以徹底解決 Windows 平台上的檔案鎖定(PermissionError)問題。
+# - 【健壯性】為多進程池增加了更全面的異常捕獲；強化了設定中的輸入驗證提示。
+# - 【可維護性】新增了 `log_info` 資訊日誌功能，用於記錄正常的程式運行狀態。
 #
-# === 12.5.2 版本更新内容 ===
-# - 【核心逻辑修正】优化了混合QR模式的判断逻辑。现在，当目标图片被一个不含QR
-#   Code的广告图片通过pHash匹配时，程式会对其进行二次精确QR扫描，确保
-#   不会漏掉任何实际存在的QR Code，解决了信息完整性问题。
-#
-# === 12.5.1 版本更新内容 ===
-# - 【功能增強】為混合模式新增「QR 座標嫁接」。现在pHash匹配的結果也能預覽QR框。
-# - 【UI 互动修正】恢复了完善的方向键导航逻辑，可在父子项目间流畅跳转。
+# === 12.6.2 版本更新內容 ===
+# - 【健壯性】強化了QR縮放尺寸的輸入驗證；增強了快取檔案鎖機制。
+# - 【使用者體驗】修正了可選依賴的安裝提示，現在會包含推薦的版本號。
+# - 【程式碼品質】簡化了部分UI繪圖和核心邏輯的程式碼。
 # ======================================================================
 
 # === 1. 標準庫導入 (Python Built-in Libraries) ===
@@ -41,6 +38,11 @@ import hashlib
 
 # === 2. 第三方庫導入 (Third-party Libraries) ===
 from PIL import Image, ImageTk, ImageOps, ImageDraw, UnidentifiedImageError
+
+try:
+    import pkg_resources
+except ImportError:
+    pkg_resources = None
 
 try:
     import imagehash
@@ -65,14 +67,13 @@ from tkinter import filedialog
 from tkinter import messagebox
 
 # === 4. 全局常量和設定 ===
-APP_VERSION = "12.5.3"
+APP_VERSION = "12.6.3"
 APP_NAME_EN = "ComicTailCleaner"
 APP_NAME_TC = "漫畫尾頁廣告清理"
 CONFIG_FILE = "config.json"
 QR_SCAN_ENABLED = False
 
 # === 5. 工具函數 (Helper Functions) ===
-# ... (Functions from here to section 9 are restored)
 def log_error(message: str, include_traceback: bool = False):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_content = f"[{timestamp}] ERROR: {message}\n"
@@ -85,34 +86,83 @@ def log_error(message: str, include_traceback: bool = False):
     except Exception as e:
         print(f"Failed to write to error log: {e}\nOriginal error: {message}", flush=True)
 
+def log_info(message: str):
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_content = f"[{timestamp}] INFO: {message}\n"
+    print(log_content, end='', flush=True)
+    try:
+        with open("info_log.txt", "a", encoding="utf-8", buffering=1) as f:
+            f.write(log_content)
+    except Exception as e:
+        print(f"Failed to write to info log: {e}", flush=True)
+
 def check_and_install_packages():
     print("正在檢查必要的 Python 套件...", flush=True)
-    required_packages = {'PIL': 'Pillow', 'imagehash': 'imagehash', 'send2trash': 'send2trash'}
-    missing_packages = []
-    for module, package in required_packages.items():
-        if module not in sys.modules:
-            missing_packages.append(package)
-    if missing_packages:
-        package_str = " ".join(missing_packages)
-        messagebox.showerror("缺少核心依賴", f"請安裝必要的 Python 套件：{', '.join(missing_packages)}。\n"
-                                             f"可以使用 'pip install {package_str}' 命令安裝。")
-        sys.exit(1)
+    
+    required = {'Pillow': 'Pillow>=9.0.0', 'imagehash': 'imagehash>=4.2.1', 'send2trash': 'send2trash>=1.8.0'}
+    optional = {'opencv-python': 'opencv-python>=4.5.0', 'numpy': 'numpy>=1.20.0'}
+    
+    missing_core = []
+    missing_optional = []
+
+    if pkg_resources:
+        for name, req_str in required.items():
+            try:
+                pkg_resources.require(req_str)
+            except (pkg_resources.DistributionNotFound, pkg_resources.VersionConflict):
+                missing_core.append(name)
+        for name, req_str in optional.items():
+            try:
+                pkg_resources.require(req_str)
+            except (pkg_resources.DistributionNotFound, pkg_resources.VersionConflict):
+                missing_optional.append(name)
     else:
-        print("Pillow, imagehash 和 send2trash 套件檢查通過。", flush=True)
-    try:
-        if 'tkinter' not in sys.modules:
-            raise ImportError("Tkinter 未成功導入")
-    except ImportError as e:
-        messagebox.showerror("Tkinter 錯誤", f"無法找到 Tkinter ({e})。您的 Python 安裝可能不完整或損壞。")
-        sys.exit(1)
+        try:
+            from PIL import Image; Image.new('RGB', (1, 1))
+        except (ImportError, AttributeError): missing_core.append('Pillow')
+        try:
+            import imagehash; imagehash.average_hash(Image.new('RGB', (8, 8)))
+        except (ImportError, AttributeError): missing_core.append('imagehash')
+        try:
+            import send2trash
+        except (ImportError, AttributeError): missing_core.append('send2trash')
+        try:
+            import cv2
+            import numpy
+            cv2.QRCodeDetector(); numpy.array([1])
+        except (ImportError, AttributeError, cv2.error):
+            missing_optional.extend(['opencv-python', 'numpy'])
+
+    if missing_core:
+        req_strings = [required[pkg] for pkg in missing_core]
+        package_str = " ".join(req_strings)
+        response = messagebox.askyesno(
+            "缺少核心依賴",
+            f"缺少必要套件：{', '.join(missing_core)}。\n\n是否嘗試自動安裝？\n（將執行命令：pip install {package_str}）",
+        )
+        if response:
+            try:
+                print(f"正在執行: {sys.executable} -m pip install {package_str}", flush=True)
+                subprocess.check_call([sys.executable, "-m", "pip", "install", *req_strings])
+                messagebox.showinfo("安裝成功", "核心套件安裝成功，請重新啟動程式。")
+                sys.exit(0)
+            except subprocess.CalledProcessError as e:
+                messagebox.showerror("安裝失敗", f"自動安裝套件失敗：{e}\n請手動打開命令提示字元並執行 'pip install {package_str}'")
+                sys.exit(1)
+        else:
+            messagebox.showerror("缺少核心依賴", f"請手動安裝必要套件：{', '.join(missing_core)}。\n命令：pip install {package_str}")
+            sys.exit(1)
+            
     global QR_SCAN_ENABLED
-    QR_SCAN_ENABLED = False
-    try:
-        if 'cv2' not in sys.modules or 'numpy' not in sys.modules:
-            raise ImportError("opencv-python 或 numpy 未成功導入")
-        QR_SCAN_ENABLED = True
-    except ImportError:
-        pass
+    QR_SCAN_ENABLED = not missing_optional
+    if not QR_SCAN_ENABLED:
+        messagebox.showwarning(
+            "缺少可選依賴",
+            f"缺少可選套件：{', '.join(missing_optional)}。\n\nQR Code 相關功能將被禁用。\n要啟用此功能，請手動安裝：pip install opencv-python>=4.5.0 numpy>=1.20.0"
+        )
+        print(f"警告: 缺少 {', '.join(missing_optional)}，QR Code 功能已禁用。", flush=True)
+    else:
+        print("所有必要及可選套件檢查通過。", flush=True)
 
 def _pool_worker_process_image(image_path: str) -> tuple[str, dict | None]:
     try:
@@ -121,43 +171,52 @@ def _pool_worker_process_image(image_path: str) -> tuple[str, dict | None]:
             phash_val = imagehash.phash(img, hash_size=8)
             stat_info = os.stat(image_path)
             return (image_path, {
-                'phash': phash_val,
-                'size': stat_info.st_size,
+                'phash': phash_val, 'size': stat_info.st_size,
                 'ctime': stat_info.st_ctime, 'mtime': stat_info.st_mtime
             })
-    except Exception:
-        return (image_path, None)
+    except Exception: return (image_path, None)
 
-def _pool_worker_detect_qr_code(image_path: str) -> tuple[str, list | None]:
+def _detect_qr_on_image(img: Image.Image) -> list | None:
+    img_cv = np.array(img.convert('RGB'))
+    qr_detector = cv2.QRCodeDetector()
+    retval, decoded_info, points, _ = qr_detector.detectAndDecodeMulti(img_cv)
+    if retval and decoded_info and any(info for info in decoded_info if info):
+        return points.tolist()
+    return None
+
+def _pool_worker_detect_qr_code(image_path: str, resize_size: int = 800) -> tuple[str, list | None]:
     try:
         with Image.open(image_path) as pil_img:
-            pil_img = ImageOps.exif_transpose(pil_img).convert('RGB')
-            img_cv = np.array(pil_img)
-            qr_detector = cv2.QRCodeDetector()
-            retval, decoded_info, points, _ = qr_detector.detectAndDecodeMulti(img_cv)
-            if retval and decoded_info and any(info for info in decoded_info if info):
-                return (image_path, points.tolist())
-            return (image_path, None)
-    except Exception:
-        return (image_path, None)
+            pil_img = ImageOps.exif_transpose(pil_img)
+            
+            resized_img = pil_img.copy()
+            resized_img.thumbnail((resize_size, resize_size), Image.Resampling.LANCZOS)
+            points = _detect_qr_on_image(resized_img)
+            
+            if not points:
+                points = _detect_qr_on_image(pil_img)
+                
+            return (image_path, points)
+    except Exception: return (image_path, None)
         
-def _pool_worker_process_image_full(image_path: str) -> tuple[str, dict | None]:
+def _pool_worker_process_image_full(image_path: str, resize_size: int = 800) -> tuple[str, dict | None]:
     try:
         with Image.open(image_path) as img:
             img = ImageOps.exif_transpose(img)
             phash_val = imagehash.phash(img, hash_size=8)
-            img_rgb = img.convert('RGB')
-            img_cv = np.array(img_rgb)
-            qr_detector = cv2.QRCodeDetector()
-            retval, decoded_info, points, _ = qr_detector.detectAndDecodeMulti(img_cv)
-            qr_points_val = points.tolist() if retval and decoded_info and any(info for info in decoded_info if info) else None
+            
+            resized_img = img.copy()
+            resized_img.thumbnail((resize_size, resize_size), Image.Resampling.LANCZOS)
+            qr_points_val = _detect_qr_on_image(resized_img)
+            if not qr_points_val:
+                qr_points_val = _detect_qr_on_image(img)
+            
         stat_info = os.stat(image_path)
         return (image_path, {
             'phash': phash_val, 'qr_points': qr_points_val,
             'size': stat_info.st_size, 'ctime': stat_info.st_ctime, 'mtime': stat_info.st_mtime
         })
-    except Exception:
-        return (image_path, None)
+    except Exception: return (image_path, None)
 
 # === 6. 配置管理相關函數 ===
 default_config = {
@@ -166,7 +225,7 @@ default_config = {
     'comparison_mode': 'mutual_comparison', 'similarity_threshold': 98,
     'enable_time_filter': False, 'start_date_filter': '', 'end_date_filter': '',
     'rebuild_scan_cache': False, 'rebuild_folder_cache': False,
-    'enable_qr_hybrid_mode': True
+    'enable_qr_hybrid_mode': True, 'qr_resize_size': 800
 }
 def load_config(config_path: str) -> dict:
     try:
@@ -180,6 +239,8 @@ def load_config(config_path: str) -> dict:
 
 def save_config(config: dict, config_path: str):
     try:
+        config.pop('rebuild_scan_cache', None)
+        config.pop('rebuild_folder_cache', None)
         config.pop('rebuild_ad_cache', None)
         with open(config_path, 'w', encoding='utf-8') as f:
             json.dump(config, f, indent=4, ensure_ascii=False)
@@ -207,24 +268,30 @@ class ScannedImageCacheManager:
                                     try: converted_data[key] = imagehash.hex_to_hash(converted_data[key])
                                     except (TypeError, ValueError): converted_data[key] = None
                             converted_cache[path] = converted_data
-                    print(f"掃描圖片快取 '{self.cache_file_path}' 已成功載入。", flush=True)
+                    log_info(f"掃描圖片快取 '{self.cache_file_path}' 已成功載入。")
                     return converted_cache
             except (json.JSONDecodeError, Exception):
-                print(f"掃描圖片快取檔案 '{self.cache_file_path}' 格式不正確，將重建。", flush=True)
+                log_info(f"掃描圖片快取檔案 '{self.cache_file_path}' 格式不正確，將重建。")
         return {}
     def save_cache(self) -> None:
-        try:
-            serializable_cache = {}
-            for path, data in self.cache.items():
-                if data:
-                    data_copy = data.copy()
-                    for key in ['phash', 'whash']:
-                        if key in data_copy and isinstance(data_copy[key], imagehash.ImageHash):
-                            data_copy[key] = str(data_copy[key])
-                    serializable_cache[path] = data_copy
-            with open(self.cache_file_path, 'w', encoding='utf-8') as f: json.dump(serializable_cache, f, indent=2)
-            print(f"掃描圖片快取已成功保存到 '{self.cache_file_path}'。", flush=True)
-        except Exception as e: log_error(f"保存掃描圖片快取時發生錯誤: {e}", True)
+        max_retries = 3; retry_delay = 0.5
+        serializable_cache = {path: {k: str(v) if isinstance(v, imagehash.ImageHash) else v for k, v in data.items()} for path, data in self.cache.items() if data}
+        for attempt in range(max_retries):
+            try:
+                os.makedirs(os.path.dirname(self.cache_file_path) or '.', exist_ok=True)
+                temp_file_path = self.cache_file_path + f".tmp{os.getpid()}"
+                with open(temp_file_path, 'w', encoding='utf-8') as f:
+                    json.dump(serializable_cache, f, indent=2)
+                os.replace(temp_file_path, self.cache_file_path)
+                log_info(f"掃描圖片快取已成功保存到 '{self.cache_file_path}'。")
+                return
+            except (IOError, OSError) as e:
+                log_error(f"保存快取失敗 (嘗試 {attempt + 1}/{max_retries}): {e}", True)
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                else:
+                    messagebox.showerror("快取保存失敗", f"無法保存快取檔案 '{self.cache_file_path}'，請檢查檔案權限或關閉占用檔案的程式（例如防毒軟體）。\n錯誤: {e}")
+                    break
     def get_data(self, file_path: str) -> dict | None:
         if file_path in self.cache:
             cached_data = self.cache[file_path]
@@ -242,7 +309,7 @@ class ScannedImageCacheManager:
         if os.path.exists(self.cache_file_path):
             try: os.remove(self.cache_file_path)
             except OSError as e: log_error(f"刪除掃描快取檔案時發生錯誤: {e}", True)
-        print(f"掃描圖片哈希快取檔案 '{self.cache_file_path}' 已被標記為刪除。", flush=True)
+        log_info(f"掃描圖片哈希快取檔案 '{self.cache_file_path}' 已被標記為刪除。")
 
 class FolderCreationCacheManager:
     def __init__(self, cache_file_path: str = "folder_creation_cache.json"):
@@ -251,17 +318,39 @@ class FolderCreationCacheManager:
     def _load_cache(self) -> dict:
         if os.path.exists(self.cache_file_path):
             try:
-                with open(self.cache_file_path, 'r', encoding='utf-8') as f: return json.load(f)
+                with open(self.cache_file_path, 'r', encoding='utf-8') as f: 
+                    cache = json.load(f)
+                    log_info(f"資料夾建立時間快取 '{self.cache_file_path}' 已成功載入。")
+                    return cache
             except Exception as e: log_error(f"載入資料夾建立時間快取時發生錯誤: {e}", True)
         return {}
     def save_cache(self) -> None:
-        try:
-            with open(self.cache_file_path, 'w', encoding='utf-8') as f: json.dump(self.cache, f, indent=2)
-        except Exception as e: log_error(f"保存資料夾建立時間快取時發生錯誤: {e}", True)
+        max_retries = 3; retry_delay = 0.5
+        for attempt in range(max_retries):
+            try:
+                os.makedirs(os.path.dirname(self.cache_file_path) or '.', exist_ok=True)
+                temp_file_path = self.cache_file_path + f".tmp{os.getpid()}"
+                with open(temp_file_path, 'w', encoding='utf-8') as f:
+                    json.dump(self.cache, f, indent=2)
+                os.replace(temp_file_path, self.cache_file_path)
+                log_info(f"資料夾建立時間快取已成功保存到 '{self.cache_file_path}'。")
+                return
+            except (IOError, OSError) as e:
+                log_error(f"保存資料夾快取失敗 (嘗試 {attempt + 1}/{max_retries}): {e}", True)
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                else:
+                    messagebox.showerror("快取保存失敗", f"無法保存資料夾快取檔案 '{self.cache_file_path}'，請檢查檔案權限。\n錯誤: {e}")
+                    break
     def get_creation_time(self, folder_path: str) -> float | None:
         if folder_path in self.cache: return self.cache[folder_path]
-        try: ctime = os.path.getctime(folder_path); self.cache[folder_path] = ctime; return ctime
-        except Exception as e: log_error(f"獲取資料夾建立時間失敗 {folder_path}: {e}"); return None
+        try: 
+            ctime = os.path.getctime(folder_path)
+            self.cache[folder_path] = ctime
+            return ctime
+        except Exception as e: 
+            log_error(f"獲取資料夾建立時間失敗 {folder_path}: {e}")
+            return None
     def invalidate_cache(self) -> None:
         self.cache = {};
         if os.path.exists(self.cache_file_path):
@@ -315,16 +404,11 @@ def extract_last_n_files_from_folders(folder_paths: list[str], count: int, enabl
     return extracted
 
 # === 9. 核心比對引擎 ===
-# ... (This is where the full ImageComparisonEngine class goes)
-
-# === 10. GUI 類別 ===
-# ... (This is where the full Tooltip, SettingsGUI, and MainWindow classes go)
-# === 9. 核心比對引擎 ===
 class ImageComparisonEngine:
     def __init__(self, config: dict, progress_queue: Queue | None = None, control_events: dict | None = None):
         self.config, self.progress_queue, self.control_events = config, progress_queue, control_events
         self.system_qr_scan_capability = QR_SCAN_ENABLED
-        print(f"ImageComparisonEngine (v{APP_VERSION}) initialized.", flush=True)
+        log_info(f"ImageComparisonEngine (v{APP_VERSION}) initialized.")
 
     def _check_control(self) -> bool:
         if self.control_events:
@@ -343,6 +427,7 @@ class ImageComparisonEngine:
 
     def find_duplicates(self) -> tuple[list, dict]:
         self._update_progress(text="任務開始...")
+        log_info("Scan task started.")
         if self._check_control(): return [], {}
         time_filter_config = {'enabled': self.config.get('enable_time_filter', False)}
         if time_filter_config['enabled']:
@@ -383,26 +468,35 @@ class ImageComparisonEngine:
                 paths_to_recalc.append(path)
                 if cached_data: file_data[path] = cached_data
         hit_rate = (cache_hits / len(file_paths) * 100) if file_paths else 100
-        print(f"快取檢查 ({description}) - 命中率: {hit_rate:.1f}% ({cache_hits}/{len(file_paths)})", flush=True)
+        log_info(f"快取檢查 ({description}) - 命中率: {hit_rate:.1f}% ({cache_hits}/{len(file_paths)})")
         self._update_progress(text=f"{description}快取命中率: {hit_rate:.1f}%")
         if paths_to_recalc:
             self._update_progress(text=f"使用 {cpu_count()} 進程計算 {len(paths_to_recalc)} 個新檔案...", p_type='progress', value=0)
-            with Pool(processes=cpu_count()) as pool:
-                results_iterator = pool.imap_unordered(worker_function, paths_to_recalc)
-                total_to_calc = len(paths_to_recalc)
-                for i, (path, result) in enumerate(results_iterator):
-                    if self._check_control(): pool.terminate(); return None
-                    data_to_update = result[1] if isinstance(result, tuple) and len(result) == 2 else result
-                    current_data = file_data.get(path, {})
-                    if worker_function in [_pool_worker_process_image, _pool_worker_process_image_full]:
-                        current_data.update(data_to_update or {})
-                    else:
-                        current_data[data_key] = data_to_update
-                    file_data[path] = current_data
-                    cache_manager.update_data(path, current_data)
-                    current_progress = int((i + 1) / total_to_calc * 100)
-                    if (i + 1) % 50 == 0 or (i + 1) == total_to_calc:
-                        self._update_progress(p_type='progress', value=current_progress, text=f"計算{description}中...({i+1}/{total_to_calc})")
+            try:
+                with Pool(processes=cpu_count()) as pool:
+                    try:
+                        results_iterator = pool.imap_unordered(worker_function, paths_to_recalc)
+                        total_to_calc = len(paths_to_recalc)
+                        for i, (path, result) in enumerate(results_iterator):
+                            if self._check_control():
+                                pool.terminate(); pool.join(); return None
+                            data_to_update = result[1] if isinstance(result, tuple) and len(result) == 2 else result
+                            current_data = file_data.get(path, {})
+                            if worker_function in [_pool_worker_process_image, _pool_worker_process_image_full]:
+                                current_data.update(data_to_update or {})
+                            else:
+                                current_data[data_key] = data_to_update
+                            file_data[path] = current_data
+                            cache_manager.update_data(path, current_data)
+                            current_progress = int((i + 1) / total_to_calc * 100)
+                            if (i + 1) % 50 == 0 or (i + 1) == total_to_calc:
+                                self._update_progress(p_type='progress', value=current_progress, text=f"計算{description}中...({i+1}/{total_to_calc})")
+                    except Exception as e:
+                        log_error(f"進程池執行失敗: {e}", True); return None
+                    finally:
+                        pool.close(); pool.join()
+            except Exception as e:
+                log_error(f"初始化進程池失敗: {e}", True); return None
         cache_manager.save_cache()
         self._update_progress(text=f"{description}屬性計算完成。")
         return file_data
@@ -465,7 +559,8 @@ class ImageComparisonEngine:
         return found_items, all_file_data
     
     def _detect_qr_codes_pure(self, files_to_process: list[str], scan_cache_manager: ScannedImageCacheManager) -> tuple[list, dict]:
-        all_file_data = self._process_images_with_cache(files_to_process, scan_cache_manager, "QR Code 檢測", _pool_worker_detect_qr_code, 'qr_points')
+        resize_size = self.config.get('qr_resize_size', 800)
+        all_file_data = self._process_images_with_cache(files_to_process, scan_cache_manager, "QR Code 檢測", lambda p: _pool_worker_detect_qr_code(p, resize_size), 'qr_points')
         if all_file_data is None: return [], {}
         found_qr_images = []
         for image_path, data in all_file_data.items():
@@ -482,7 +577,8 @@ class ImageComparisonEngine:
             return self._detect_qr_codes_pure(files_to_process, scan_cache_manager)
         ad_paths = [os.path.join(r, f) for r, _, fs in os.walk(ad_folder_path) for f in fs if f.lower().endswith(('.png','.jpg','.jpeg','.webp'))]
         ad_cache_manager = ScannedImageCacheManager(ad_folder_path)
-        ad_file_data = self._process_images_with_cache(ad_paths, ad_cache_manager, "廣告圖片屬性", _pool_worker_process_image_full, 'qr_points')
+        resize_size = self.config.get('qr_resize_size', 800)
+        ad_file_data = self._process_images_with_cache(ad_paths, ad_cache_manager, "廣告圖片屬性", lambda p: _pool_worker_process_image_full(p, resize_size), 'qr_points')
         if ad_file_data is None: return [], {}
         ad_hashes = {path: data['phash'] for path, data in ad_file_data.items() if data and data.get('phash')}
         target_file_data = self._process_images_with_cache(files_to_process, scan_cache_manager, "掃描目標雜湊", _pool_worker_process_image, 'phash')
@@ -493,16 +589,16 @@ class ImageComparisonEngine:
             target_hash = data.get('phash')
             if not target_hash:
                 remaining_files.append(path); continue
-            match_found_in_loop = False
+            match_found_and_skipped = False
             for ad_path, ad_hash in ad_hashes.items():
                 if ad_hash and target_hash - ad_hash <= max_diff:
                     ad_has_qr = ad_file_data.get(ad_path) and ad_file_data[ad_path].get('qr_points')
                     if ad_has_qr:
                         found_items.append((ad_path, path, "廣告匹配(快速)"))
                         target_file_data.setdefault(path, {})['qr_points'] = ad_file_data[ad_path]['qr_points']
-                        match_found_in_loop = True
+                        match_found_and_skipped = True
                     break
-            if not match_found_in_loop:
+            if not match_found_and_skipped:
                 remaining_files.append(path)
         ad_match_count = len([it for it in found_items if it[2]=='廣告匹配(快速)'])
         self._update_progress(text=f"快速匹配完成，找到 {ad_match_count} 個廣告。對 {len(remaining_files)} 個檔案進行 QR 掃描...")
@@ -516,6 +612,7 @@ class ImageComparisonEngine:
         all_file_data = {**target_file_data, **ad_file_data}
         self._update_progress(p_type='progress', value=100, text=f"混合掃描完成。共找到 {len(found_items)} 個目標。")
         return found_items, all_file_data
+
 # === 10. GUI 類別 ===
 class Tooltip:
     def __init__(self, widget: tk.Widget, text: str):
@@ -543,7 +640,7 @@ class SettingsGUI(tk.Toplevel):
         self.master = master
         self.config = master.config.copy()
         self.title(f"{APP_NAME_TC} v{APP_VERSION} - 設定")
-        self.geometry("700x680"); self.resizable(False, False); self.transient(master); self.grab_set()
+        self.geometry("700x700"); self.resizable(False, False); self.transient(master); self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         main_frame = ttk.Frame(self, padding="10"); main_frame.pack(fill=tk.BOTH, expand=True); main_frame.grid_columnconfigure(1, weight=1)
         self._create_widgets(main_frame); self._load_settings_into_gui(); self._setup_bindings()
@@ -558,7 +655,10 @@ class SettingsGUI(tk.Toplevel):
         self.enable_extract_count_limit_var = tk.BooleanVar(); ttk.Checkbutton(basic_settings_frame, text="啟用圖片抽取數量限制", variable=self.enable_extract_count_limit_var).grid(row=0, column=0, columnspan=3, sticky="w", pady=2)
         ttk.Label(basic_settings_frame, text="提取末尾圖片數量:").grid(row=1, column=0, sticky="w", pady=2); self.extract_count_var = tk.StringVar(); self.extract_count_spinbox = ttk.Spinbox(basic_settings_frame, from_=1, to=100, textvariable=self.extract_count_var, width=5); self.extract_count_spinbox.grid(row=1, column=1, sticky="w", padx=5); ttk.Label(basic_settings_frame, text="(從每個資料夾末尾提取N張圖片)").grid(row=1, column=2, sticky="w")
         ttk.Label(basic_settings_frame, text="相似度閾值 (%):").grid(row=2, column=0, sticky="w", pady=2); self.similarity_threshold_var = tk.DoubleVar(); ttk.Scale(basic_settings_frame, from_=80, to=100, orient="horizontal", variable=self.similarity_threshold_var, length=200, command=self._update_threshold_label).grid(row=2, column=1, sticky="w", padx=5); self.threshold_label = ttk.Label(basic_settings_frame, text=""); self.threshold_label.grid(row=2, column=2, sticky="w")
-        ttk.Label(basic_settings_frame, text="排除資料夾名稱 (換行分隔):").grid(row=3, column=0, sticky="w", pady=2); self.excluded_folders_text = tk.Text(basic_settings_frame, width=40, height=3); self.excluded_folders_text.grid(row=3, column=1, columnspan=2, sticky="ew", padx=5)
+        ttk.Label(basic_settings_frame, text="QR 檢測縮放尺寸:").grid(row=3, column=0, sticky="w", pady=2)
+        self.qr_resize_var = tk.StringVar(); ttk.Spinbox(basic_settings_frame, from_=400, to=1600, increment=200, textvariable=self.qr_resize_var, width=5).grid(row=3, column=1, sticky="w", padx=5)
+        ttk.Label(basic_settings_frame, text="px (較大尺寸提高準確性但降速)").grid(row=3, column=2, sticky="w")
+        ttk.Label(basic_settings_frame, text="排除資料夾名稱 (換行分隔):").grid(row=4, column=0, sticky="w", pady=2); self.excluded_folders_text = tk.Text(basic_settings_frame, width=40, height=3); self.excluded_folders_text.grid(row=4, column=1, columnspan=2, sticky="ew", padx=5)
         row_idx += 1
         mode_frame = ttk.LabelFrame(frame, text="比對模式", padding="10"); mode_frame.grid(row=row_idx, column=0, sticky="nsew", pady=5, padx=5)
         self.comparison_mode_var = tk.StringVar(); 
@@ -595,6 +695,7 @@ class SettingsGUI(tk.Toplevel):
         self.enable_time_filter_var.set(self.config.get('enable_time_filter', False)); self.start_date_var.set(start_date); self.end_date_var.set(end_date)
         self.rebuild_folder_cache_var.set(self.config.get('rebuild_folder_cache', False))
         self.enable_qr_hybrid_var.set(self.config.get('enable_qr_hybrid_mode', True))
+        self.qr_resize_var.set(str(self.config.get('qr_resize_size', 800)))
         self._toggle_ad_folder_entry_state(); self._toggle_time_filter_fields(); self._toggle_hybrid_qr_option_state()
 
     def _setup_bindings(self) -> None: 
@@ -641,6 +742,17 @@ class SettingsGUI(tk.Toplevel):
                 'rebuild_folder_cache': self.rebuild_folder_cache_var.get(),
                 'enable_qr_hybrid_mode': self.enable_qr_hybrid_var.get()
             }
+            qr_resize_input = self.qr_resize_var.get()
+            try:
+                qr_resize_size = int(qr_resize_input)
+                if not (400 <= qr_resize_size <= 1600):
+                    messagebox.showerror("錯誤", f"QR 縮放尺寸 '{qr_resize_input}' 無效，必須在 400 到 1600 之間。", parent=self)
+                    return False
+                config['qr_resize_size'] = qr_resize_size
+            except ValueError:
+                messagebox.showerror("錯誤", f"QR 縮放尺寸 '{qr_resize_input}' 必須是有效的數字。", parent=self)
+                return False
+            
             if not os.path.isdir(config['root_scan_folder']): messagebox.showerror("錯誤", "根掃描資料夾無效！", parent=self); return False
             is_ad_mode_active = config['comparison_mode'] == 'ad_comparison' or (config['comparison_mode'] == 'qr_detection' and config['enable_qr_hybrid_mode'])
             if is_ad_mode_active and not os.path.isdir(config['ad_folder_path']): messagebox.showerror("錯誤", "此模式需要有效的廣告圖片資料夾！", parent=self); return False
@@ -767,7 +879,6 @@ class MainWindow(tk.Tk):
             log_error(f"核心邏輯執行失敗: {e}", True)
             self.progress_queue.put({'type': 'finish', 'text': f"執行錯誤: {e}"})
             if self.winfo_exists(): messagebox.showerror("執行錯誤", f"程式執行時發生錯誤: {e}")
-            
     def _populate_treeview(self) -> None:
         self.tree.delete(*self.tree.get_children())
         current_selection = self.selected_files.copy(); self.selected_files.clear()
@@ -819,7 +930,7 @@ class MainWindow(tk.Tk):
             self.tree.selection_set(first_item); self.tree.focus(first_item)
     def _on_treeview_click(self, event: tk.Event) -> None:
         item_id = self.tree.identify_row(event.y)
-        if not item_id: return
+        if not item_id or not self.tree.exists(item_id): return
         tags = self.tree.item(item_id, "tags")
         if self.tree.identify_column(event.x) == "#1":
              if 'ad_parent_item' not in tags and 'source_copy_item' not in tags and 'protected_item' not in tags:
@@ -844,7 +955,8 @@ class MainWindow(tk.Tk):
         self.pil_img_compare = self._load_pil_image(cmp_path, self.compare_path_label)
         self._update_all_previews()
     def _draw_qr_outline(self, image: Image.Image, qr_points_list: list) -> Image.Image:
-        if not qr_points_list: return image
+        if not qr_points_list or not isinstance(qr_points_list, (list, np.ndarray)):
+            return image
         draw = ImageDraw.Draw(image)
         try:
             for qr_points_single in qr_points_list:
@@ -1042,11 +1154,19 @@ def main() -> None:
     if sys.platform.startswith('win'):
         try: set_start_method('spawn', force=True)
         except RuntimeError: pass
-    print(f"=== {APP_NAME_TC} v{APP_VERSION} - 啟動中 ===", flush=True)
-    try: check_and_install_packages()
-    except SystemExit: return
-    root = MainWindow()
-    root.mainloop()
+    
+    root = tk.Tk()
+    root.withdraw()
+    
+    try:
+        check_and_install_packages()
+    except SystemExit:
+        root.destroy()
+        return
+    
+    root.destroy()
+    app = MainWindow()
+    app.mainloop()
 
 if __name__ == '__main__':
     from multiprocessing import freeze_support
