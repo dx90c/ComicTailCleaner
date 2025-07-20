@@ -1,6 +1,6 @@
 # ======================================================================
-# 檔案名稱：ComicTailCleaner_v12.5.2.py
-# 版本號：12.5.2
+# 檔案名稱：ComicTailCleaner_v12.5.3.py
+# 版本號：12.5.3
 # 專案名稱：ComicTailCleaner (漫畫尾頁廣告清理)
 #
 # === 程式說明 ===
@@ -8,7 +8,12 @@
 # 它能高效地掃描大量漫畫檔案，並通過感知哈希算法找出內容上
 # 相似或完全重複的圖片，提升漫畫閱讀體驗。
 #
-# === 12.5.2 版本更新內容 ===
+# === 12.5.3 版本更新內容 ===
+# - 【混合模式逻辑修正】修正了混合QR模式下的一个关键逻辑漏洞，即当目标图片
+#   匹配到不含QR Code的广告时，不再创建多余的匹配记录，从而避免了同一张
+#   图片重复出现在不同结果分组中的问题。
+#
+# === 12.5.2 版本更新内容 ===
 # - 【核心逻辑修正】优化了混合QR模式的判断逻辑。现在，当目标图片被一个不含QR
 #   Code的广告图片通过pHash匹配时，程式会对其进行二次精确QR扫描，确保
 #   不会漏掉任何实际存在的QR Code，解决了信息完整性问题。
@@ -16,9 +21,6 @@
 # === 12.5.1 版本更新内容 ===
 # - 【功能增強】為混合模式新增「QR 座標嫁接」。现在pHash匹配的結果也能預覽QR框。
 # - 【UI 互动修正】恢复了完善的方向键导航逻辑，可在父子项目间流畅跳转。
-# - 【功能设计优化】重写了「选取建议」逻辑，使其在各模式下行为更智慧。
-# - 【核心 Bug 修正】修复了纯粹QR Code模式因中文路径处理失败而无法返回结果的问题。
-# - 【多执行绪修正】修正了「暂停」功能的状态文字显示逻辑错误。
 # ======================================================================
 
 # === 1. 標準庫導入 (Python Built-in Libraries) ===
@@ -63,13 +65,14 @@ from tkinter import filedialog
 from tkinter import messagebox
 
 # === 4. 全局常量和設定 ===
-APP_VERSION = "12.5.2"
+APP_VERSION = "12.5.3"
 APP_NAME_EN = "ComicTailCleaner"
 APP_NAME_TC = "漫畫尾頁廣告清理"
 CONFIG_FILE = "config.json"
 QR_SCAN_ENABLED = False
 
 # === 5. 工具函數 (Helper Functions) ===
+# ... (Functions from here to section 9 are restored)
 def log_error(message: str, include_traceback: bool = False):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_content = f"[{timestamp}] ERROR: {message}\n"
@@ -312,6 +315,11 @@ def extract_last_n_files_from_folders(folder_paths: list[str], count: int, enabl
     return extracted
 
 # === 9. 核心比對引擎 ===
+# ... (This is where the full ImageComparisonEngine class goes)
+
+# === 10. GUI 類別 ===
+# ... (This is where the full Tooltip, SettingsGUI, and MainWindow classes go)
+# === 9. 核心比對引擎 ===
 class ImageComparisonEngine:
     def __init__(self, config: dict, progress_queue: Queue | None = None, control_events: dict | None = None):
         self.config, self.progress_queue, self.control_events = config, progress_queue, control_events
@@ -345,7 +353,6 @@ class ImageComparisonEngine:
                 time_filter_config['start'] = datetime.datetime.strptime(self.config['start_date_filter'], "%Y-%m-%d") if self.config.get('start_date_filter') else None
                 time_filter_config['end'] = datetime.datetime.strptime(self.config['end_date_filter'], "%Y-%m-%d").replace(hour=23, minute=59, second=59) if self.config.get('end_date_filter') else None
             except ValueError: time_filter_config['enabled'] = False
-
         all_folders = get_all_subfolders(self.config['root_scan_folder'], self.config['excluded_folders'], self.progress_queue, self.control_events, time_filter_config)
         if self._check_control(): return [], {}
         files_dict = extract_last_n_files_from_folders(all_folders, self.config['extract_count'], self.config['enable_extract_count_limit'], self.progress_queue, self.control_events)
@@ -354,10 +361,8 @@ class ImageComparisonEngine:
         if not files_to_process:
             self._update_progress(text="在指定路徑下未找到任何圖片檔案。")
             return [], {}
-            
         scan_cache_manager = ScannedImageCacheManager(self.config['root_scan_folder'])
         if self.config.get('rebuild_scan_cache'): scan_cache_manager.invalidate_cache()
-
         if self.config['comparison_mode'] == "qr_detection":
             if self.config.get('enable_qr_hybrid_mode'):
                 return self._detect_qr_codes_hybrid(files_to_process, scan_cache_manager)
@@ -471,61 +476,46 @@ class ImageComparisonEngine:
 
     def _detect_qr_codes_hybrid(self, files_to_process: list[str], scan_cache_manager: ScannedImageCacheManager) -> tuple[list, dict]:
         self._update_progress(text="混合模式：開始 pHash 快速匹配...")
-        
         ad_folder_path = self.config['ad_folder_path']
         if not os.path.isdir(ad_folder_path):
             self._update_progress(text="混合模式錯誤：廣告資料夾無效。轉為純粹 QR 掃描...")
             return self._detect_qr_codes_pure(files_to_process, scan_cache_manager)
-            
         ad_paths = [os.path.join(r, f) for r, _, fs in os.walk(ad_folder_path) for f in fs if f.lower().endswith(('.png','.jpg','.jpeg','.webp'))]
         ad_cache_manager = ScannedImageCacheManager(ad_folder_path)
         ad_file_data = self._process_images_with_cache(ad_paths, ad_cache_manager, "廣告圖片屬性", _pool_worker_process_image_full, 'qr_points')
         if ad_file_data is None: return [], {}
         ad_hashes = {path: data['phash'] for path, data in ad_file_data.items() if data and data.get('phash')}
-
         target_file_data = self._process_images_with_cache(files_to_process, scan_cache_manager, "掃描目標雜湊", _pool_worker_process_image, 'phash')
         if target_file_data is None: return [], {}
-
         found_items, remaining_files = [], []
         max_diff = int((100 - self.config['similarity_threshold']) / 100 * 64)
-        
         for path, data in target_file_data.items():
             target_hash = data.get('phash')
             if not target_hash:
                 remaining_files.append(path); continue
-            
             match_found_in_loop = False
             for ad_path, ad_hash in ad_hashes.items():
                 if ad_hash and target_hash - ad_hash <= max_diff:
                     ad_has_qr = ad_file_data.get(ad_path) and ad_file_data[ad_path].get('qr_points')
-                    found_items.append((ad_path, path, "廣告匹配(快速)"))
                     if ad_has_qr:
+                        found_items.append((ad_path, path, "廣告匹配(快速)"))
                         target_file_data.setdefault(path, {})['qr_points'] = ad_file_data[ad_path]['qr_points']
                         match_found_in_loop = True
                     break
-            
             if not match_found_in_loop:
                 remaining_files.append(path)
-
         ad_match_count = len([it for it in found_items if it[2]=='廣告匹配(快速)'])
         self._update_progress(text=f"快速匹配完成，找到 {ad_match_count} 個廣告。對 {len(remaining_files)} 個檔案進行 QR 掃描...")
-
         if remaining_files:
             qr_results, qr_file_data = self._detect_qr_codes_pure(remaining_files, scan_cache_manager)
-            
             existing_targets = {item[1] for item in found_items}
             for qr_item in qr_results:
                 if qr_item[1] not in existing_targets:
                     found_items.append(qr_item)
-            
             target_file_data.update(qr_file_data)
-            
         all_file_data = {**target_file_data, **ad_file_data}
         self._update_progress(p_type='progress', value=100, text=f"混合掃描完成。共找到 {len(found_items)} 個目標。")
         return found_items, all_file_data
-
-# === 10. GUI 類別 ===
-# ... (The full GUI code follows)
 # === 10. GUI 類別 ===
 class Tooltip:
     def __init__(self, widget: tk.Widget, text: str):
@@ -674,7 +664,6 @@ class MainWindow(tk.Tk):
         self.cancel_event, self.pause_event = threading.Event(), threading.Event()
         self.selectable_child_ids = []
         self._setup_main_window(); self._create_widgets(); self._bind_keys(); self.check_queue()
-
     def _setup_main_window(self) -> None:
         self.title(f"{APP_NAME_TC} v{APP_VERSION}"); self.geometry("1600x900")
         self.protocol("WM_DELETE_WINDOW", self._on_closing); sys.excepthook = self.custom_excepthook
