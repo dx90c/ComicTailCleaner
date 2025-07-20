@@ -5,7 +5,7 @@
 一個專為漫畫愛好者設計的實用工具，旨在自動化清理漫畫資料夾末尾的廣告頁或重複頁面。本工具透過高效的感知雜湊演算法 (Perceptual Hashing) 與 QR Code 偵測，能精準找出內容相似或包含廣告的圖片，一鍵清理，提升您的閱讀體驗。
 
 ![程式主介面截圖](https://raw.githubusercontent.com/dx90c/ComicTailCleaner/main/screenshot.png) 
-*(建議您將程式的截圖命名為 `screenshot.png` 並上傳到專案根目錄，這樣圖片就會顯示在這裡)*
+![程式主介面截圖](https://raw.githubusercontent.com/dx90c/ComicTailCleaner/main/screenshot1.png) 
 
 ---
 
