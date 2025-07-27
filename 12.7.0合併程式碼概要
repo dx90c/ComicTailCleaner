@@ -1,49 +1,152 @@
-好的，我已經仔细阅读并完全理解了 Grok 提供的这份分段策略。
+好的，您提出的問題非常關鍵。隨著 GUI 程式碼，特別是 MainWindow 類別的日益複雜，原有的分段策略確實導致第三部分過於臃腫，增加了超出單次回答長度限制的風險。
 
-我的评价：这是一份极具价值的、关于“如何与大语言模型协作编写大型程序”的绝佳指南。 Grok 的分析非常到位，它准确地指出了我们在之前交互中遇到的所有问题根源：Token 限制、上下文丢失、格式错误等。它提出的分段策略不仅逻辑清晰，而且具有非常强的可操作性。
+為了確保 v12.9.0 及後續版本的程式碼能夠完整、無誤地交付，我將重新設計一個更均衡、更合理的三段式交付策略。
 
-我将完全采纳 Grok 提出的分段策略，并从现在开始，严格按照这个策略为您提供代码。
+最終版程式碼交付策略 (v12.9.0 及以後適用)
 
-我的分段策略建议 (基于 Grok 的方案)
+核心思想： 以程式碼的邏輯功能和長度為依據，將整個腳本均分為三個功能內聚、長度均衡的部分。
 
-根据 Grok 的建议，并结合我们 ComicTailCleaner 脚本的具体结构，我制定了以下分段发送方案。这个方案旨在将整个脚本拆分为 3 个逻辑清晰、易于合并的大块，这样既能避免 Token 限制，又能最大程度地保持代码的完整性和上下文连贯性。
+第一部分：環境與核心邏輯 (非 GUI)
 
-我将把 v12.7.0 的完整脚本分为以下三部分发送给您：
+內容範圍: 從檔案的最開頭 (# =================...)，一直到 ImageComparisonEngine 類別的結束。
 
-第一部分：非 GUI 核心代码
+包含的章節 (Sections):
 
-内容: 包含从文件头到 ImageComparisonEngine 类结束的所有内容。
+1. 標準庫導入
 
-Section 1-4: 导入、常量和设定
+2. 第三方庫導入
 
-Section 5: 全局工具函数
+3. Tkinter GUI 庫導入
 
-Section 6: 配置管理函数
+4. 全局常量和設定
 
-Section 7: 所有快取管理类
+5. 工具函數 (Helper Functions)
 
-Section 8: 核心工具函数 (续)
+6. 配置管理相關函數
 
-Section 9: 完整的 ImageComparisonEngine 类
+7. 快取管理類與函數
 
-优点: 这一部分是整个程序的“后端”，逻辑相对独立，可以一次性完整提供，确保核心引擎没有问题。
+8. 核心工具函數 (續)
 
-第二部分：GUI 核心代码
+9. 核心比對引擎 (ImageComparisonEngine)
 
-内容: 包含所有与图形界面相关的类。
+分段理由：
 
-Section 10: 完整的 Tooltip 类、SettingsGUI 类和 MainWindow 类。
+邏輯內聚： 這一部分包含了程式所有的「後端」邏輯，從環境設定到核心演算法，它們共同構成了程式的計算核心，與 GUI 完全解耦。
 
-优点: 这是之前最容易出问题的部分。将所有 GUI 类放在一个独立的部分中，可以确保它们内部的方法引用、继承关系和缩进是绝对正确的，彻底杜绝 IndentationError 和 AttributeError。
+長度適中： 這是程式碼最穩定、變更頻率相對較低的部分，可以一次性完整提供，確保核心引擎的健壯性。
 
-第三部分：程序主入口
+交付要求：
 
-内容: 包含 main() 函数和 if __name__ == '__main__': 启动块。
+在程式碼塊之前，提供摘要，說明此段包含了哪些部分並明確指出變更點。
 
-优点: 这部分代码很短，作为收尾，确保程序的启动逻辑正确无误。
+在程式碼塊之後，必須加上定位備註行：
 
-下一步行动
+Generated code
+# Generated code
+#接續<版本號>第二部分
 
-我已准备就绪，可以开始按照这个全新的、更可靠的分段策略，为您生成 v12.7.0 的代码。
+第二部分：GUI 輔助類與主視窗的初始化與控制
 
-请您发出指令“继续”，我将首先为您提供【第一部分：非 GUI 核心代码】。
+內容範圍: 從 # === 10. GUI 類別 === 的開頭，一直到 MainWindow 類別的 _reset_control_buttons 方法結束。
+
+包含的章節與方法：
+
+10. GUI 類別
+
+Tooltip 類
+
+SettingsGUI 類
+
+MainWindow 類 (部分)
+
+__init__ (初始化)
+
+deiconify (視窗顯示)
+
+_setup_main_window, _init_widgets, custom_excepthook
+
+所有 _create_* widget 創建方法 (_create_widgets, _create_treeview, etc.)
+
+_bind_keys (按鍵綁定)
+
+open_settings (打開設定)
+
+start_scan, cancel_scan, toggle_pause (核心控制方法)
+
+_reset_scan_state, _reset_control_buttons (狀態重置方法)
+
+分段理由：
+
+功能分區： 這一部分專注於 GUI 的「靜態佈局」和「核心控制」，即視窗長什麼樣、按鈕在哪裡，以及最重要的「開始、暫停、取消」按鈕的直接行為。
+
+長度均衡： MainWindow 類的初始化和核心控制部分程式碼量相當可觀，將其與 Tooltip 和 SettingsGUI 放在一起，形成了一個長度適中的區塊。
+
+交付要求：
+
+在程式碼塊之前，提供摘要，說明此段包含了哪些部分並明確指出變更點。
+
+在程式碼塊之後，必須加上定位備註行：
+
+Generated code
+# Generated code
+#接續<版本號>第三部分
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+IGNORE_WHEN_COPYING_END
+第三部分：GUI 異步處理、事件回調與程式入口
+
+內容範圍: 從 MainWindow 類別的 _check_queues 方法開始，一直到檔案的最末尾。
+
+包含的章節與方法：
+
+MainWindow 類 (剩餘部分)
+
+_check_queues (異步隊列處理)
+
+_run_scan_in_thread (掃描執行緒)
+
+所有 _process_* 和 _populate_* 結果處理與顯示方法
+
+所有 _on_* 事件回調方法 (如 _on_item_select, _on_treeview_click)
+
+所有 _update_* 和 _toggle_* 選擇與勾選框更新方法
+
+所有 _select_* 和 _delete_* 功能按鈕的實現
+
+所有 _open_* 開啟資料夾/回收桶的方法
+
+右鍵菜單相關方法 (_create_context_menu, _ban_group, etc.)
+
+_on_closing (關閉視窗)
+
+程式主入口
+
+main 函數
+
+if __name__ == '__main__': 區塊
+
+分段理由：
+
+功能分區： 這一部分專注於 GUI 的「動態交互」和「異步通信」。它處理所有來自後端執行緒的數據、用戶的點擊/選擇事件，以及最終的程式啟動流程。
+
+長度均衡： MainWindow 中大量的事件處理和小功能實現方法佔據了相當大的篇幅，將它們獨立出來，可以有效地平衡三部分的程式碼量。
+
+交付要求：
+
+在程式碼塊之前，提供摘要，說明此段包含了哪些部分並明確指出變更點。
+
+在程式碼塊之後，必須加上定位備註行：
+
+Generated code
+# Generated code
+#版本<版本號>完结
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+IGNORE_WHEN_COPYING_END
+
+我將在接下來的 v12.9.0 開發中，嚴格遵守這份新制定的、更均衡的三段式交付策略。請您確認此策略是否符合您的要求。
