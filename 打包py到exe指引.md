@@ -16,31 +16,33 @@
 根據不同的需求，我們有兩種打包模式可供選擇。
 
 ### 模式一：單目錄模式 (One-Directory)
-此模式建議在 **開發或除錯** 階段使用。它會產生一個包含主程式 EXE 及所有依賴檔案的資料夾。
+此模式會產生一個包含主程式 EXE 及所有依賴檔案的資料夾。
 
 *   **優點**：啟動速度快。
 *   **缺點**：發布時需提供整個資料夾。
 
+
 ```cmd
-pyinstaller --noconfirm --clean --windowed --add-data "config.json;." --hidden-import=Pillow --hidden-import=imagehash --hidden-import=send2trash --hidden-import=cv2 --hidden-import=numpy --hidden-import=scipy --hidden-import=six --hidden-import=pywt --copy-metadata=Pillow --copy-metadata=imagehash --copy-metadata=send2trash --copy-metadata=opencv-python --copy-metadata=numpy --copy-metadata=scipy --copy-metadata=six --copy-metadata=PyWavelets --collect-all=imagehash --collect-all=scipy "ComicTailCleaner.py"
+pyinstaller --noconfirm --clean --windowed --hidden-import=psutil --copy-metadata=psutil --hidden-import=Pillow --hidden-import=imagehash --hidden-import=send2trash --hidden-import=cv2 --hidden-import=numpy --hidden-import=scipy --hidden-import=six --hidden-import=pywt --copy-metadata=Pillow --copy-metadata=imagehash --copy-metadata=send2trash --copy-metadata=opencv-python --copy-metadata=numpy --copy-metadata=scipy --copy-metadata=six --copy-metadata=PyWavelets --collect-all=imagehash --collect-all=scipy "ComicTailCleaner.py"
 ```
 
 ### 模式二：單檔案模式 (One-File)
-此模式建議在 **正式發布版本** 時使用。它會將所有內容打包成一個獨立的 EXE 檔案，方便使用者下載與執行。
+此模式會將所有內容打包成一個獨立的 EXE 檔案，方便使用者下載與執行。
 
 *   **優點**：乾淨俐落，便於分享。
 *   **缺點**：首次啟動速度較慢（因需在背景解壓縮）。
 
-```cmd
-pyinstaller --noconfirm --clean --windowed --onefile --add-data "config.json;." --hidden-import=Pillow --hidden-import=imagehash --hidden-import=send2trash --hidden-import=cv2 --hidden-import=numpy --hidden-import=scipy --hidden-import=six --hidden-import=pywt --copy-metadata=Pillow --copy-metadata=imagehash --copy-metadata=send2trash --copy-metadata=opencv-python --copy-metadata=numpy --copy-metadata=scipy --copy-metadata=six --copy-metadata=PyWavelets --collect-all=imagehash --collect-all=scipy "ComicTailCleaner.py"
-```
 
+```cmd
+pyinstaller --noconfirm --clean --windowed --onefile --hidden-import=psutil --copy-metadata=psutil --hidden-import=Pillow --hidden-import=imagehash --hidden-import=send2trash --hidden-import=cv2 --hidden-import=numpy --hidden-import=scipy --hidden-import=six --hidden-import=pywt --copy-metadata=Pillow --copy-metadata=imagehash --copy-metadata=send2trash --copy-metadata=opencv-python --copy-metadata=numpy --copy-metadata=scipy --copy-metadata=six --copy-metadata=PyWavelets --collect-all=imagehash --collect-all=scipy "ComicTailCleaner.py"
+```
 ---
 
 ## 關鍵參數詳解
 
 *   `--onefile`：將所有內容打包成一個獨立的 EXE 檔案。
 *   `--windowed`：指定這是一個圖形化介面 (GUI) 程式，執行時不顯示黑色的命令列視窗。
+*   `--hidden-import=psutil --copy-metadata=psutil：性能日誌功能
 *   `--add-data "config.json;."`：將 `config.json` 檔案打包進去。分號前的 `config.json` 是來源檔案，分號後的 `.` 代表將其放置在 EXE 執行時的根目錄。
 *   `--hidden-import=...`：手動告知 PyInstaller 有哪些它未能自動偵測到的「隱藏導入」模組。主要用於打包模組的 **程式碼**。
 *   `--copy-metadata=...`：手動複製指定套件的 **元數據 (Metadata)**。這對於需要進行版本校驗的函式庫 (如 `pkg_resources`) 至關重要。
