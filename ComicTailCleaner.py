@@ -1,6 +1,7 @@
+
 # ======================================================================
-# 檔案名稱：ComicTailCleaner_v12.9.12.py
-# 版本號：12.9.12 (功能完整實現版)
+# 檔案名稱：ComicTailCleaner_v13.1.0.py
+# 版本號：13.1.0 (掃描前端時間篩選修正版)
 # 專案名稱：ComicTailCleaner (漫畫尾頁廣告清理)
 #
 # === 程式說明 ===
@@ -8,17 +9,15 @@
 # 它能高效地掃描大量漫畫檔案，並通過感知哈希算法找出內容上
 # 相似或完全重複的圖片，提升漫畫閱讀體驗。
 #
-# === 12.9.12 版本更新內容 ===
-# - 【功能實現】完整實作了 `_mark_new_ads` 和 `_move_selected_to_ad_library` 
-#   兩個核心 GUI 功能，並修正了 `AttributeError` 崩潰問題。
-# - 【架構優化】统一了 Treeview 的数据存储规范，确保档案路径等核心数据通过
-#   `values` 传递，而 `tags` 仅用于分类和样式，提升了代码的健壮性。
-# - 【穩定性增強】在所有圖片處理的入口處增加了對無效圖像（例如尺寸為0或無法讀取）
-#   的防呆檢查，避免將異常數據傳遞給 OpenCV 導致底層錯誤。
-# - 【UX 優化】調整了主視窗的初始顯示位置，避免底部功能按鈕被任务栏遮挡。
+# === 13.1.0 版本更新內容 ===
+# - 【核心性能修正】根據精確的問題報告，重構了`get_files_to_process`中的
+#   增量掃描邏輯。現在，時間篩選器會在掃描任務的最前端（deque入列前）
+#   就過濾掉不符合時間範圍的資料夾，從根本上避免了對大量無關資料夾的
+#   無效掃描，極大地提升了啟用時間篩選時的掃描效率。
 #
-# === 12.9.11 開發週期內部測試與合併版本 ===
-#
+# === 13.0.1 版本更新內容 ===
+# - 【UI性能修正】修復了在啟用「資料夾建立時間篩選」後，結果列表(TreeView)
+#   仍然會載入並顯示所有項目導致效能低落的問題。
 # ======================================================================
 
 # === 1. 標準庫導入 (Python Built-in Libraries) ===
@@ -36,7 +35,7 @@ import platform
 import threading
 import time
 from queue import Queue, Empty
-import hashlib
+import re
 
 # === 2. 第三方庫導入 (Third-party Libraries) ===
 from PIL import Image, ImageTk, ImageOps, ImageDraw, UnidentifiedImageError
@@ -74,7 +73,7 @@ from tkinter import filedialog
 from tkinter import messagebox
 
 # === 4. 全局常量和設定 ===
-APP_VERSION = "12.9.12"
+APP_VERSION = "13.1.0"
 APP_NAME_EN = "ComicTailCleaner"
 APP_NAME_TC = "漫畫尾頁廣告清理"
 CONFIG_FILE = "config.json"
@@ -88,9 +87,12 @@ def log_error(message: str, include_traceback: bool = False):
     log_content = f"[{timestamp}] ERROR: {message}\n"
     if include_traceback:
         log_content += traceback.format_exc() + "\n"
+    
+    log_file = "error_log.txt"
     print(log_content, end='', flush=True)
     try:
-        with open("error_log.txt", "a", encoding="utf-8", buffering=1) as f:
+        file_exists = os.path.exists(log_file)
+        with open(log_file, "a", encoding="utf-8-sig", buffering=1) as f:
             f.write(log_content)
     except Exception as e:
         print(f"Failed to write to error log: {e}\nOriginal error: {message}", flush=True)
@@ -98,9 +100,13 @@ def log_error(message: str, include_traceback: bool = False):
 def log_info(message: str):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_content = f"[{timestamp}] INFO: {message}\n"
+
+    log_file = "info_log.txt"
     print(log_content, end='', flush=True)
     try:
-        with open("info_log.txt", "a", encoding="utf-8", buffering=1) as f:
+        file_exists = os.path.exists(log_file)
+        # 使用 utf-8-sig 會在文件開頭寫入BOM (如果文件不存在)
+        with open(log_file, "a", encoding="utf-8-sig", buffering=1) as f:
             f.write(log_content)
     except Exception as e:
         print(f"Failed to write to info log: {e}", flush=True)
@@ -302,13 +308,50 @@ def save_config(config: dict, config_path: str):
         log_error(f"保存設定檔 '{config_path}' 時發生錯誤: {e}", True)
 
 # === 7. 快取管理類與函數 ===
+def _sanitize_path_for_filename(path: str) -> str:
+    """清理路徑字串，使其可用於檔名。"""
+    if not path:
+        return ""
+    # 取得最後一個目錄名
+    basename = os.path.basename(os.path.normpath(path))
+    # 移除或替換不合法字元
+    sanitized = re.sub(r'[\\/*?:"<>|]', '_', basename)
+    return sanitized
+
 class ScannedImageCacheManager:
-    # ... 此類別無變化 ...
-    def __init__(self, root_scan_folder: str):
-        normalized_path = os.path.normpath(root_scan_folder).replace('\\', '/')
-        hash_object = hashlib.sha256(normalized_path.encode('utf-8'))
-        self.cache_file_path = f"scanned_hashes_cache_{hash_object.hexdigest()}.json"
+    def __init__(self, root_scan_folder: str, ad_folder_path: str | None = None):
+        sanitized_root = _sanitize_path_for_filename(root_scan_folder)
+        sanitized_ad = _sanitize_path_for_filename(ad_folder_path) if ad_folder_path else None
+        
+        base_name = f"scanned_hashes_cache_{sanitized_root}"
+        if sanitized_ad:
+            base_name += f"_{sanitized_ad}"
+        
+        self.cache_file_path = f"{base_name}.json"
+        
+        # 處理檔名衝突
+        counter = 1
+        while os.path.exists(self.cache_file_path):
+            # 只有當路徑與現有快取的實際路徑不符時，才尋找新檔名
+            try:
+                with open(self.cache_file_path, 'r', encoding='utf-8') as f:
+                    # 簡單檢查，假設快取內至少有一個條目
+                    data = json.load(f)
+                    first_key = next(iter(data), None)
+                    if first_key and os.path.normpath(first_key).startswith(os.path.normpath(root_scan_folder)):
+                        break # 檔名匹配，使用現有檔案
+            except (json.JSONDecodeError, StopIteration, TypeError):
+                # 快取檔案損壞或為空，可以覆蓋
+                break
+
+            self.cache_file_path = f"{base_name}_{counter}.json"
+            counter += 1
+            if counter > 10: # 防止無限循環
+                 log_error("快取檔名衝突過多，可能存在問題。")
+                 break
+
         self.cache = self._load_cache()
+
     def _load_cache(self) -> dict:
         if os.path.exists(self.cache_file_path):
             try:
@@ -357,6 +400,14 @@ class ScannedImageCacheManager:
                 self.cache[file_path].update(data)
             else:
                 self.cache[file_path] = data
+    def remove_data(self, file_path: str) -> bool:
+        """從快取中移除單一檔案的紀錄"""
+        with CACHE_LOCK:
+            if file_path in self.cache:
+                del self.cache[file_path]
+                log_info(f"[快取清理] 已從圖片快取中移除條目: {file_path}")
+                return True
+            return False
     def remove_entries_from_folder(self, folder_path: str) -> int:
         with CACHE_LOCK:
             count = 0
@@ -387,9 +438,28 @@ class ScannedImageCacheManager:
 
 class FolderStateCacheManager:
     def __init__(self, root_scan_folder: str):
-        normalized_path = os.path.normpath(root_scan_folder).replace('\\', '/')
-        hash_object = hashlib.sha256(normalized_path.encode('utf-8'))
-        self.cache_file_path = f"folder_state_cache_{hash_object.hexdigest()}.json"
+        sanitized_root = _sanitize_path_for_filename(root_scan_folder)
+        base_name = f"folder_state_cache_{sanitized_root}"
+        self.cache_file_path = f"{base_name}.json"
+        
+        # 處理檔名衝突
+        counter = 1
+        while os.path.exists(self.cache_file_path):
+            try:
+                with open(self.cache_file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    first_key = next(iter(data), None)
+                    if first_key and os.path.normpath(first_key).startswith(os.path.normpath(root_scan_folder)):
+                        break
+            except (json.JSONDecodeError, StopIteration, TypeError):
+                break
+            
+            self.cache_file_path = f"{base_name}_{counter}.json"
+            counter += 1
+            if counter > 10:
+                log_error("資料夾快取檔名衝突過多，可能存在問題。")
+                break
+                
         self.cache = self._load_cache()
 
     def _load_cache(self) -> dict:
@@ -496,35 +566,43 @@ def _incremental_scan_traversal(root_folder: str, excluded_paths: set, time_filt
     scanned_count = 0
 
     while queue:
-        if control_events['cancel'].is_set(): return {}
+        if control_events['cancel'].is_set():
+            return {}
         current_dir = queue.popleft()
-        
+
         if any(os.path.normpath(current_dir).startswith(ex) for ex in excluded_paths):
             continue
-            
+
         scanned_count += 1
         if scanned_count % 50 == 0:
             _update_progress(progress_queue, text=f"📁 正在掃描資料夾結構... ({scanned_count})")
 
-        try: stat_info = os.stat(current_dir)
-        except OSError: continue
-        
-        ctime, mtime = stat_info.st_ctime, stat_info.st_mtime
-        
-        if current_dir != root_folder and time_filter.get('enabled'):
-            folder_dt = datetime.datetime.fromtimestamp(ctime)
-            if (time_filter['start'] and folder_dt < time_filter['start']) or \
-               (time_filter['end'] and folder_dt > time_filter['end']):
-                continue
-
-        live_folders[current_dir] = {'mtime': mtime, 'ctime': ctime}
-        
+        try:
+            stat_info = os.stat(current_dir)
+            live_folders[current_dir] = {'mtime': stat_info.st_mtime, 'ctime': stat_info.st_ctime}
+        except OSError:
+            continue
+            
         try:
             with os.scandir(current_dir) as it:
                 for entry in it:
-                    if entry.is_dir(): queue.append(entry.path)
-        except OSError: continue
-        
+                    if control_events['cancel'].is_set():
+                        return {}
+                    if entry.is_dir():
+                        # 【核心性能修正 v13.1.0】在此處進行時間篩選
+                        if time_filter.get('enabled'):
+                            try:
+                                entry_ctime_dt = datetime.datetime.fromtimestamp(entry.stat().st_ctime)
+                                if (time_filter['start'] and entry_ctime_dt < time_filter['start']) or \
+                                   (time_filter['end'] and entry_ctime_dt > time_filter['end']):
+                                    continue  # 不符合時間範圍，跳過此資料夾及其所有子資料夾
+                            except OSError:
+                                continue # 無法獲取狀態，跳過
+                        
+                        queue.append(entry.path)
+        except OSError:
+            continue
+    
     return live_folders
 
 def get_files_to_process(config: dict, image_cache: ScannedImageCacheManager, progress_queue: Queue | None = None, control_events: dict | None = None) -> list[str]:
@@ -668,7 +746,7 @@ class ImageComparisonEngine:
             self._update_progress(text="任務開始...")
             log_performance("[開始] 掃描任務")
             
-            scan_cache_manager = ScannedImageCacheManager(self.config['root_scan_folder'])
+            scan_cache_manager = ScannedImageCacheManager(self.config['root_scan_folder'], self.config.get('ad_folder_path'))
             
             if not self.tasks_to_process:
                 initial_files = get_files_to_process(self.config, scan_cache_manager, self.progress_queue, self.control_events)
@@ -817,11 +895,11 @@ class ImageComparisonEngine:
         all_file_data = {**self.file_data, **ad_file_data}
         self._update_progress(text="🔍 圖片比對中...", p_type='progress', value=0)
         max_diff = int((100 - self.config['similarity_threshold']) / 100 * 64)
-        found_items = []
         
         log_performance("[開始] 比對階段")
 
         if self.config['comparison_mode'] == 'ad_comparison':
+            found_items = []
             ad_hashes = {path: data['phash'] for path, data in ad_file_data.items() if data and data.get('phash')}
             total_comparisons = len(self.file_data)
             for i, (target_path, target_data) in enumerate(self.file_data.items()):
@@ -836,6 +914,7 @@ class ImageComparisonEngine:
                         found_items.append((ad_path, target_path, f"{sim:.1f}%"))
         
         elif self.config['comparison_mode'] == 'mutual_comparison':
+            temp_found_pairs = []
             hash_groups = defaultdict(list)
             for path, data in self.file_data.items():
                 if data and data.get('phash'): hash_groups[data['phash']].append(path)
@@ -844,8 +923,8 @@ class ImageComparisonEngine:
                 if len(paths) > 1:
                     base_path = min(paths)
                     for other_path in paths:
-                        if base_path == other_path: continue
-                        found_items.append((base_path, other_path, "100.0%"))
+                        if base_path != other_path:
+                            temp_found_pairs.append((base_path, other_path, "100.0%"))
             
             unique_hashes = list(hash_groups.keys())
             n = len(unique_hashes)
@@ -857,7 +936,6 @@ class ImageComparisonEngine:
             work_chunks = [(i, min(i + chunk_size, n), unique_hashes, hash_groups, max_diff) for i in range(0, n, chunk_size)]
             
             if not self.pool:
-                log_info(f"為比對階段創建一個新的進程池，大小為 {comparison_procs}。")
                 self.pool = Pool(processes=comparison_procs)
             
             async_results = [self.pool.apply_async(_pool_worker_compare_hashes, args=(chunk,)) for chunk in work_chunks]
@@ -866,12 +944,11 @@ class ImageComparisonEngine:
             completed_count = 0
             while completed_count < total_chunks:
                 if self._check_control() != 'continue':
-                     self._cleanup_pool()
-                     return None
+                     self._cleanup_pool(); return None
                 
                 newly_completed_results = [res for res in async_results if res.ready()]
                 for res in newly_completed_results:
-                    found_items.extend(res.get())
+                    temp_found_pairs.extend(res.get())
                     async_results.remove(res)
                     completed_count += 1
 
@@ -879,6 +956,46 @@ class ImageComparisonEngine:
                 if (completed_count % 10 == 0) or (completed_count == total_chunks):
                     self._update_progress(p_type='progress', value=progress, text=f"🔍 唯一雜湊互相比對中... ({completed_count}/{total_chunks})")
                 time.sleep(0.1)
+
+            path_to_group_leader = {}
+            processed_paths = set()
+            
+            sorted_pairs = sorted(temp_found_pairs, key=lambda x: (x[0], x[1]))
+
+            for path1, path2, sim in sorted_pairs:
+                leader1 = path_to_group_leader.get(path1)
+                leader2 = path_to_group_leader.get(path2)
+
+                if leader1 and leader2:
+                    if leader1 != leader2:
+                        final_leader = min(leader1, leader2)
+                        other_leader = max(leader1, leader2)
+                        for path, leader in path_to_group_leader.items():
+                            if leader == other_leader:
+                                path_to_group_leader[path] = final_leader
+                elif leader1:
+                    path_to_group_leader[path2] = leader1
+                elif leader2:
+                    path_to_group_leader[path1] = leader2
+                else:
+                    leader = min(path1, path2)
+                    path_to_group_leader[path1] = leader
+                    path_to_group_leader[path2] = leader
+
+            final_groups = defaultdict(list)
+            for path, leader in path_to_group_leader.items():
+                if path != leader:
+                    final_groups[leader].append(path)
+            
+            found_items = []
+            for leader, children in final_groups.items():
+                for child in set(children):
+                    original_sim = "???"
+                    for p1, p2, sim_val in sorted_pairs:
+                        if (p1 == leader and p2 == child) or (p1 == child and p2 == leader):
+                            original_sim = sim_val
+                            break
+                    found_items.append((leader, child, original_sim))
 
         log_performance("[完成] 比對階段")
         return found_items, all_file_data
@@ -950,9 +1067,14 @@ class ImageComparisonEngine:
             qr_engine = ImageComparisonEngine(self.config, self.progress_queue, self.control_events)
             qr_engine.tasks_to_process = remaining_files_for_qr
             qr_engine.total_task_count = len(remaining_files_for_qr)
-            qr_results, qr_data = qr_engine._detect_qr_codes_pure(remaining_files_for_qr, scan_cache_manager)
             
-            if qr_results is None: return None
+            # 【錯誤修補 v13.0.0】增加對None的返回檢查
+            qr_result_tuple = qr_engine._detect_qr_codes_pure(remaining_files_for_qr, scan_cache_manager)
+            if qr_result_tuple is None:
+                return None # 任務被中斷
+            
+            qr_results, qr_data = qr_result_tuple
+            
             self.failed_tasks.extend(qr_engine.failed_tasks)
             
             existing_targets = {item[1] for item in found_items}
@@ -963,8 +1085,8 @@ class ImageComparisonEngine:
         
         all_file_data = {**self.file_data, **ad_file_data}
         return found_items, all_file_data
-# Generated code
-#接續12.9.12第二部分
+#接續13.1.0第二部分
+
 # === 10. GUI 類別 ===
 class Tooltip:
     def __init__(self, widget: tk.Widget, text: str):
@@ -1065,12 +1187,14 @@ class SettingsGUI(tk.Toplevel):
 
         if messagebox.askyesno("確認清理", "確定要將所有圖片哈希快取移至回收桶嗎？\n下次掃描將會重新計算所有圖片的哈希值。", parent=self):
             try:
-                cache_manager = ScannedImageCacheManager(root_scan_folder)
+                # 根據新邏輯實例化
+                cache_manager = ScannedImageCacheManager(root_scan_folder, ad_folder_path)
                 cache_manager.invalidate_cache()
                 if ad_folder_path and os.path.isdir(ad_folder_path):
+                    # 廣告庫自己有獨立的快取
                     ad_cache_manager = ScannedImageCacheManager(ad_folder_path)
                     ad_cache_manager.invalidate_cache()
-                messagebox.showinfo("清理成功", "所有圖片快取檔案已移至回收桶。", parent=self)
+                messagebox.showinfo("清理成功", "所有相關圖片快取檔案已移至回收桶。", parent=self)
             except Exception as e:
                 log_error(f"清理圖片快取時發生錯誤: {e}", True)
                 messagebox.showerror("清理失敗", f"清理圖片快取時發生錯誤：\n{e}", parent=self)
@@ -1214,11 +1338,16 @@ class MainWindow(tk.Tk):
         
         self.all_found_items, self.all_file_data = [], {}
         self.selected_files, self.banned_groups = set(), set()
+        
+        # 【UI邏輯重構 v13.0.0】新增狀態變數
+        self.protected_paths = set()
+        self.parent_to_children = defaultdict(list)
+        self.child_to_parent = {}
+
         self.pil_img_target, self.pil_img_compare = None, None
         self.img_tk_target, self.img_tk_compare = None, None
         self.scan_thread, self._after_id = None, None
         self.cancel_event, self.pause_event = threading.Event(), threading.Event()
-        self.selectable_child_ids = []
         
         self.scan_queue, self.preview_queue = Queue(), Queue()
         self.executor = ThreadPoolExecutor(max_workers=2)
@@ -1301,11 +1430,13 @@ class MainWindow(tk.Tk):
         self.progress_bar=ttk.Progressbar(status_frame,orient='horizontal',mode='determinate'); self.progress_bar.pack(side=tk.RIGHT,fill=tk.X,expand=True,padx=5)
 
     def _create_treeview(self, parent_frame: ttk.Frame) -> None:
-        columns=("checkbox","filename","path","count","size","ctime","similarity"); self.tree=ttk.Treeview(parent_frame,columns=columns,show="headings",selectmode="extended")
-        headings={"checkbox":"","filename":"群組/圖片","path":"路徑","count":"數量","size":"大小","ctime":"建立日期","similarity":"相似度/類型"}; widths={"checkbox":40,"filename":300,"path":300,"count":50,"size":100,"ctime":150,"similarity":80}
+        # 【UI邏輯重構 v13.0.0】調整列定義
+        columns=("status","filename","path","count","size","ctime","similarity"); self.tree=ttk.Treeview(parent_frame,columns=columns,show="headings",selectmode="extended")
+        headings={"status":"狀態","filename":"群組/圖片","path":"路徑","count":"數量","size":"大小","ctime":"建立日期","similarity":"相似度/類型"}; widths={"status":50,"filename":300,"path":300,"count":50,"size":100,"ctime":150,"similarity":80}
         for col,text in headings.items():self.tree.heading(col,text=text)
         for col,width in widths.items():self.tree.column(col,width=width,minwidth=width,stretch=(col in["filename","path"]))
-        self.tree.tag_configure('child_item',foreground='#555555');self.tree.tag_configure('source_copy_item',background='lightyellow');self.tree.tag_configure('ad_parent_item',font=self.bold_font,background='#FFFACD');self.tree.tag_configure('parent_item',font=self.bold_font); self.tree.tag_configure('qr_item', background='#E0FFFF'); self.tree.tag_configure('ad_match_item', background='#FFE4E1')
+        
+        self.tree.tag_configure('child_item',foreground='#555555');self.tree.tag_configure('source_copy_item',background='lightyellow');self.tree.tag_configure('ad_parent_item',font=self.bold_font,background='#FFFACD');self.tree.tag_configure('protected_parent', font=self.bold_font, background='#FFFACD'); self.tree.tag_configure('parent_item',font=self.bold_font); self.tree.tag_configure('qr_item', background='#E0FFFF'); self.tree.tag_configure('ad_match_item', background='#FFE4E1')
         vscroll=ttk.Scrollbar(parent_frame,orient="vertical",command=self.tree.yview);self.tree.configure(yscrollcommand=vscroll.set)
         vscroll.bind("<B1-Motion>", self._on_scroll)
         self.tree.pack(side=tk.LEFT,fill=tk.BOTH,expand=True);vscroll.pack(side=tk.RIGHT,fill=tk.Y)
@@ -1332,7 +1463,7 @@ class MainWindow(tk.Tk):
         
         self.mark_new_ad_button.pack(side=tk.LEFT, padx=5)
         self.move_to_ad_library_button.pack(side=tk.LEFT, padx=2)
-        self.mark_new_ad_button.pack_forget() # Initially hide this button
+        self.mark_new_ad_button.pack_forget()
 
         actions_frame=ttk.Frame(parent_frame)
         actions_frame.pack(side=tk.RIGHT,padx=5,pady=5)
@@ -1379,6 +1510,10 @@ class MainWindow(tk.Tk):
         self.pause_event.clear()
         self.is_paused = False
         self.engine_instance = None
+        # 【UI邏輯重構 v13.0.0】重置狀態變數
+        self.protected_paths.clear()
+        self.parent_to_children.clear()
+        self.child_to_parent.clear()
         
     def cancel_scan(self) -> None:
         if self.scan_thread and self.scan_thread.is_alive():
@@ -1413,8 +1548,8 @@ class MainWindow(tk.Tk):
         self.pause_button.config(state=tk.DISABLED, text="暫停")
         self.cancel_button.config(state=tk.DISABLED)
         self._reset_scan_state()
-# Generated code
-#接續12.9.12第三部分
+#接續13.1.0第三部分
+
     def _check_queues(self) -> None:
         try:
             while True:
@@ -1488,16 +1623,28 @@ class MainWindow(tk.Tk):
     def _process_scan_results(self, failed_tasks: list) -> None:
         self.tree.delete(*self.tree.get_children())
         self.selected_files.clear()
-        self.selectable_child_ids.clear()
-        self.is_loading_page = False
-        self.current_page = 0
         
+        # 重置狀態
+        self._reset_scan_state()
+
         groups = defaultdict(list)
         for group_key, item_path, value_str in self.all_found_items:
             groups[group_key].append((item_path, value_str))
         
         self.sorted_groups = sorted(groups.items(), key=lambda item: item[0])
         
+        # 預先填充受保護路徑
+        is_ad_mode = self.config['comparison_mode'] == 'ad_comparison'
+        is_hybrid_qr = self.config['comparison_mode'] == 'qr_detection' and self.config['enable_qr_hybrid_mode']
+        if is_ad_mode or is_hybrid_qr:
+            for group_key, _ in self.sorted_groups:
+                 # 在混合模式下，只有 "廣告匹配(快速)" 的群組基準是受保護的
+                is_ad_match = any(item[1] == "廣告匹配(快速)" for item in groups[group_key])
+                if is_ad_mode or is_ad_match:
+                    self.protected_paths.add(group_key)
+
+        self.is_loading_page = False
+        self.current_page = 0
         self._load_next_page()
         
         if self.config.get('comparison_mode') == 'qr_detection':
@@ -1518,50 +1665,86 @@ class MainWindow(tk.Tk):
         if not groups_to_load:
             self.is_loading_page = False
             return
+            
         uid = start_index * 1000 
+        mode = self.config['comparison_mode']
+        
+        # 【UI性能修正 v13.0.1】在迴圈外預先解析時間戳
+        start_ts, end_ts = None, None
+        time_filter_enabled = self.config.get("enable_time_filter", False)
+        if time_filter_enabled:
+            try:
+                start_str = self.config.get("start_date_filter")
+                end_str = self.config.get("end_date_filter")
+                if start_str:
+                    start_ts = datetime.datetime.strptime(start_str, "%Y-%m-%d").timestamp()
+                if end_str:
+                    end_ts = datetime.datetime.strptime(end_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59).timestamp()
+            except (ValueError, TypeError) as e:
+                log_error(f"UI層解析時間篩選失敗: {e}", True)
+                time_filter_enabled = False # 解析失敗則禁用篩選
+
         for group_key, items in groups_to_load:
             if group_key in self.banned_groups: continue
-            is_ad_mode = self.config['comparison_mode'] == 'ad_comparison'
-            is_mutual_mode = self.config['comparison_mode'] == 'mutual_comparison'
-            parent_id = f"group_{uid}"; uid += 1
+            
             p_data = self.all_file_data.get(group_key, {})
+            
+            # 【UI性能修正 v13.0.1】使用記憶體中的ctime進行高效過濾
+            if time_filter_enabled:
+                folder_ctime = p_data.get('ctime')
+                if folder_ctime:
+                    if (start_ts is not None and folder_ctime < start_ts) or \
+                       (end_ts is not None and folder_ctime > end_ts):
+                        continue # 跳過不在時間範圍內的群組
+            
+            parent_id = f"group_{uid}"; uid += 1
             p_size = f"{p_data.get('size', 0):,}" if 'size' in p_data else "N/A"
             p_ctime = datetime.datetime.fromtimestamp(p_data.get('ctime')).strftime('%Y/%m/%d %H:%M') if p_data.get('ctime') else "N/A"
-            first_item_path, first_value_str = items[0]
-            is_qr_scan_result = first_value_str == "QR Code 檢出"
-            is_ad_match_result = first_value_str == "廣告匹配(快速)"
+            first_value_str = items[0][1] if items else ""
 
-            # values 結構: (checkbox, filename, path, count, size, ctime, similarity)
-            # 檔案路徑儲存在 values[2]
-            if is_qr_scan_result:
+            is_qr_pure_mode = mode == 'qr_detection' and not self.config['enable_qr_hybrid_mode']
+            is_qr_result = first_value_str == "QR Code 檢出"
+            
+            if is_qr_result and (is_qr_pure_mode or group_key not in self.protected_paths):
                 self.tree.insert("", "end", iid=parent_id, values=("☐", os.path.basename(group_key), group_key, "", p_size, p_ctime, first_value_str), tags=('qr_item',))
-                self.selectable_child_ids.append(parent_id)
-            elif is_ad_mode or is_ad_match_result:
-                count = len(items)
-                self.tree.insert("", "end", iid=parent_id, values=("", os.path.basename(group_key), group_key, count, p_size, p_ctime, "基準廣告"), tags=('ad_parent_item',), open=True)
-            elif is_mutual_mode:
-                component = [group_key] + [item[0] for item in items]
-                count = len(set(component))
-                self.tree.insert("", "end", iid=parent_id, values=("☐", os.path.basename(group_key), group_key, count, p_size, p_ctime, "基準"), tags=('parent_item',), open=True)
+                self.child_to_parent[parent_id] = None
+                continue
 
-            if not is_qr_scan_result:
-                norm_ad_path = os.path.normpath(self.config.get('ad_folder_path', '')) if self.config.get('ad_folder_path') else None
-                for path, value_str in sorted(items, key=lambda x: x[0]):
-                    tags = ['child_item']
-                    is_in_ad_folder = norm_ad_path and os.path.normpath(path).startswith(norm_ad_path)
-                    if is_in_ad_folder: tags.append('protected_item')
-                    if is_mutual_mode and path == group_key: tags.append('source_copy_item')
-                    if is_ad_match_result: tags.append('ad_match_item')
-                    item_id = f"item_{uid}"; uid += 1
-                    c_data = self.all_file_data.get(path, {})
-                    c_size = f"{c_data.get('size', 0):,}" if 'size' in c_data else "N/A"
-                    c_ctime = datetime.datetime.fromtimestamp(c_data.get('ctime')).strftime('%Y/%m/%d %H:%M') if c_data.get('ctime') else "N/A"
-                    checkbox_val = "" if is_in_ad_folder else "☐"
-                    self.tree.insert(parent_id, "end", iid=item_id, values=(checkbox_val, f"  └─ {os.path.basename(path)}", path, "", c_size, c_ctime, value_str), tags=tuple(tags))
-                    if not is_in_ad_folder and 'source_copy_item' not in tags:
-                        self.selectable_child_ids.append(item_id)
+            parent_status = "☐"
+            parent_tags = ['parent_item']
+            
+            if group_key in self.protected_paths:
+                parent_status = "🔒 ☐"
+                parent_tags = ['protected_parent']
+                count = len(items)
+                self.tree.insert("", "end", iid=parent_id, values=(parent_status, os.path.basename(group_key), group_key, count, p_size, p_ctime, "基準廣告"), tags=tuple(parent_tags), open=True)
+            elif mode == 'mutual_comparison':
+                display_items = [(group_key, "基準 (自身)")] + sorted(items, key=lambda x: x[0])
+                count = len(display_items)
+                self.tree.insert("", "end", iid=parent_id, values=(parent_status, os.path.basename(group_key), group_key, count, p_size, p_ctime, "基準"), tags=tuple(parent_tags), open=True)
+
+            display_items = sorted(items, key=lambda x: x[0])
+            if mode == 'mutual_comparison':
+                 display_items.insert(0, (group_key, "基準 (自身)"))
+
+            for path, value_str in display_items:
+                child_id = f"item_{uid}"; uid += 1
+                tags = ['child_item']
+                if mode == 'mutual_comparison' and path == group_key:
+                    tags.append('source_copy_item')
+                elif group_key in self.protected_paths:
+                    tags.append('ad_match_item')
+                
+                c_data = self.all_file_data.get(path, {})
+                c_size = f"{c_data.get('size', 0):,}" if 'size' in c_data else "N/A"
+                c_ctime = datetime.datetime.fromtimestamp(c_data.get('ctime')).strftime('%Y/%m/%d %H:%M') if c_data.get('ctime') else "N/A"
+                
+                self.tree.insert(parent_id, "end", iid=child_id, values=("☐", f"  └─ {os.path.basename(path)}", path, "", c_size, c_ctime, value_str), tags=tuple(tags))
+                self.parent_to_children[parent_id].append(child_id)
+                self.child_to_parent[child_id] = child_id
+
         self.is_loading_page = False
-        
+
     def _on_scroll(self, event: tk.Event) -> None:
         yview = self.tree.yview()
         if yview[1] > 0.95 and not self.is_loading_page:
@@ -1583,16 +1766,28 @@ class MainWindow(tk.Tk):
 
     def _on_treeview_click(self, event: tk.Event) -> None:
         item_id = self.tree.identify_row(event.y)
-        if not item_id or not self.tree.exists(item_id):
-            return
+        if not item_id or not self.tree.exists(item_id): return
+        
         tags = self.tree.item(item_id, "tags")
+        is_parent = 'parent_item' in tags or 'protected_parent' in tags
+
         if self.tree.identify_column(event.x) == "#1":
-            if 'ad_parent_item' not in tags and 'source_copy_item' not in tags and 'protected_item' not in tags:
-                self._toggle_selection_by_item_id(item_id)
-        else:
+            if is_parent:
+                children = self.parent_to_children.get(item_id, [])
+                # 修正：只考慮可勾選的子項目
+                selectable_children = [cid for cid in children if 'source_copy_item' not in self.tree.item(cid, "tags")]
+                are_all_selected = all(self.tree.item(child, "values")[2] in self.selected_files for child in selectable_children) if selectable_children else False
+                
+                for child_id in selectable_children:
+                    self._update_child_selection(child_id, not are_all_selected)
+                self._update_parent_checkbox(item_id)
+            else: 
+                if 'source_copy_item' not in tags:
+                    self._toggle_selection_by_item_id(item_id)
+        else: 
             self.tree.selection_set(item_id)
             self.tree.focus(item_id)
-
+            
     def _on_item_select(self, event: tk.Event) -> None:
         if self._after_id:
             self.after_cancel(self._after_id)
@@ -1621,7 +1816,7 @@ class MainWindow(tk.Tk):
             parent_id = self.tree.parent(item_id)
             if parent_id:
                 cmp_path = self.tree.item(parent_id, "values")[2]
-        else: # parent or qr_item
+        else: 
             sel_path = cmp_path = values[2]
 
         if sel_path: self.executor.submit(self._load_image_worker, sel_path, self.target_path_label, True)
@@ -1695,120 +1890,126 @@ class MainWindow(tk.Tk):
         if not selected_id: return "break"
         current_id, target_id = selected_id[0], None
         if direction == "Down":
-            parent = self.tree.parent(current_id)
-            if parent == "" and self.tree.item(current_id, "open"):
-                children = self.tree.get_children(current_id)
-                target_id = children[0] if children else self.tree.next(current_id)
-            elif parent != "":
-                siblings = self.tree.get_children(parent)
-                try:
-                    idx = siblings.index(current_id)
-                    if idx < len(siblings) - 1: target_id = siblings[idx + 1]
-                    else: target_id = self.tree.next(parent)
-                except ValueError: target_id = self.tree.next(current_id)
-            else: target_id = self.tree.next(current_id)
+            target_id = self.tree.next(current_id)
         elif direction == "Up":
-            parent = self.tree.parent(current_id)
-            if parent != "" and current_id == self.tree.get_children(parent)[0]: target_id = parent
-            else:
-                prev_id = self.tree.prev(current_id)
-                if prev_id and self.tree.parent(prev_id) == "" and self.tree.item(prev_id, "open"):
-                    children = self.tree.get_children(prev_id)
-                    target_id = children[-1] if children else prev_id
-                else: target_id = prev_id
+            target_id = self.tree.prev(current_id)
         if target_id: self.tree.selection_set(target_id); self.tree.focus(target_id); self.tree.see(target_id)
         return "break"
 
     def _toggle_selection_by_item_id(self, item_id: str) -> None:
-        tags = self.tree.item(item_id, "tags")
-        if 'protected_item' in tags: return
-        
         path = self.tree.item(item_id, "values")[2]
+        is_selected = path in self.selected_files
+        self._update_child_selection(item_id, not is_selected)
         
-        if 'parent_item' in tags or 'qr_item' in tags:
-            is_selected = path in self.selected_files
-            self._update_child_selection(item_id, not is_selected)
-            if 'parent_item' in tags:
-                for child_id in self.tree.get_children(item_id):
-                    self._update_child_selection(child_id, not is_selected)
-        elif 'child_item' in tags:
-            is_selected = path in self.selected_files
-            self._update_child_selection(item_id, not is_selected)
-            if (parent_id := self.tree.parent(item_id)): self._update_parent_checkbox(parent_id)
+        parent_id = self.child_to_parent.get(item_id)
+        if parent_id:
+            self._update_parent_checkbox(parent_id)
 
     def _update_child_selection(self, item_id: str, select: bool) -> None:
-        tags = self.tree.item(item_id, "tags")
-        if 'source_copy_item' in tags or 'protected_item' in tags:
-             self.tree.set(item_id, "checkbox", "")
-             return
-        
         path = self.tree.item(item_id, "values")[2]
         if select:
             self.selected_files.add(path)
-            self.tree.set(item_id, "checkbox", "☑")
+            self.tree.set(item_id, "status", "☑")
         else:
             self.selected_files.discard(path)
-            self.tree.set(item_id, "checkbox", "☐")
+            self.tree.set(item_id, "status", "☐")
 
-    def _update_parent_checkbox(self, parent_id: str) -> None:
-        if 'ad_parent_item' in self.tree.item(parent_id, "tags"): return
-        children = [cid for cid in self.tree.get_children(parent_id) if 'protected_item' not in self.tree.item(cid, "tags") and 'source_copy_item' not in self.tree.item(cid, "tags")]
+    def _update_parent_checkbox(self, parent_id: str):
+        if not self.tree.exists(parent_id): return
+        
+        children = self.parent_to_children.get(parent_id, [])
         if not children: return
-        selected_count = sum(1 for cid in children if self.tree.item(cid, "values")[0] == "☑")
-        self.tree.set(parent_id, "checkbox", "☑" if selected_count == len(children) else "☐")
+        
+        selectable_children = [child for child in children if 'source_copy_item' not in self.tree.item(child, "tags")]
+        if not selectable_children: return
+
+        selected_children = [child for child in selectable_children if self.tree.item(child, "values")[2] in self.selected_files]
+        
+        all_selected = len(selected_children) == len(selectable_children)
+        new_status_char = "☑" if all_selected else "☐"
+        
+        tags = self.tree.item(parent_id, "tags")
+        if 'protected_parent' in tags:
+            self.tree.set(parent_id, "status", f"🔒 {new_status_char}")
+        else:
+            self.tree.set(parent_id, "status", new_status_char)
 
     def _toggle_selection(self, event: tk.Event | None = None) -> None:
-        for item_id in self.tree.selection(): self._toggle_selection_by_item_id(item_id)
+        for item_id in self.tree.selection():
+            tags = self.tree.item(item_id, "tags")
+            if 'source_copy_item' not in tags:
+                self._toggle_selection_by_item_id(item_id)
 
-    def _refresh_checkboxes_display(self) -> None:
-        for item_id in self.selectable_child_ids:
-            path = self.tree.item(item_id, "values")[2]
-            is_selected = path in self.selected_files
-            self.tree.set(item_id, "checkbox", "☑" if is_selected else "☐")
-        
+    def _get_all_selectable_paths(self):
+        paths = set()
         for parent_id in self.tree.get_children(""):
-             if 'parent_item' in self.tree.item(parent_id, "tags"):
-                 self._update_parent_checkbox(parent_id)
+            tags = self.tree.item(parent_id, "tags")
+            if 'qr_item' in tags:
+                paths.add(self.tree.item(parent_id, "values")[2])
+            elif parent_id in self.parent_to_children:
+                for child_id in self.parent_to_children[parent_id]:
+                    if 'source_copy_item' not in self.tree.item(child_id, "tags"):
+                         paths.add(self.tree.item(child_id, "values")[2])
+        return paths
 
-    def _update_all_checkboxes(self, select_logic: callable) -> None:
-        all_paths = {self.tree.item(cid, "values")[2] for cid in self.selectable_child_ids}
-        self.selected_files = select_logic(all_paths, self.selected_files)
-        self._refresh_checkboxes_display()
-
-    def _select_all(self) -> None: self._update_all_checkboxes(lambda all_p, sel_p: all_p)
-    def _select_suggested_for_deletion(self) -> None:
-        paths_to_select = set()
-        for group_id in self.tree.get_children(""):
-            tags = self.tree.item(group_id, "tags")
-            if 'qr_item' in tags: paths_to_select.add(self.tree.item(group_id, "values")[2])
+    def _refresh_all_checkboxes(self):
+        for parent_id in self.tree.get_children(""):
+            tags = self.tree.item(parent_id, "tags")
+            if 'qr_item' in tags:
+                path = self.tree.item(parent_id, "values")[2]
+                self.tree.set(parent_id, "status", "☑" if path in self.selected_files else "☐")
             else:
-                for child_id in self.tree.get_children(group_id):
-                     child_tags = self.tree.item(child_id, "tags")
-                     if 'protected_item' not in child_tags and 'source_copy_item' not in child_tags:
-                        paths_to_select.add(self.tree.item(child_id, "values")[2])
-        self._update_all_checkboxes(lambda all_p, sel_p: paths_to_select)
-    def _deselect_all(self) -> None: self.selected_files.clear(); self._update_all_checkboxes(lambda all_p, sel_p: set())
-    def _invert_selection(self) -> None: self._update_all_checkboxes(lambda all_p, sel_p: all_p - sel_p)
+                for child_id in self.parent_to_children.get(parent_id, []):
+                    if 'source_copy_item' not in self.tree.item(child_id, "tags"):
+                        self._update_child_selection(child_id, self.tree.item(child_id, "values")[2] in self.selected_files)
+                self._update_parent_checkbox(parent_id)
 
-    def _mark_new_ads(self):
-        """
-        僅選取 (勾選) 所有在 Treeview 中被標記為 'qr_item' (淺藍色背景) 的項目。
-        """
-        self._deselect_all()
+    def _select_all(self) -> None:
+        self.selected_files = self._get_all_selectable_paths()
+        self._refresh_all_checkboxes()
+
+    def _select_suggested_for_deletion(self) -> None:
+        self.selected_files = self._get_all_selectable_paths()
+        self._refresh_all_checkboxes()
+        
+    def _deselect_all(self) -> None:
+        self.selected_files.clear()
+        self._refresh_all_checkboxes()
+
+    def _invert_selection(self) -> None:
+        all_paths = self._get_all_selectable_paths()
+        self.selected_files = all_paths - self.selected_files
+        self._refresh_all_checkboxes()
+
+    def _mark_new_ads(self) -> None:
         paths_to_select = set()
         for item_id in self.tree.get_children(""):
             if 'qr_item' in self.tree.item(item_id, "tags"):
                 path = self.tree.item(item_id, "values")[2]
                 paths_to_select.add(path)
         
-        self.selected_files.update(paths_to_select)
-        self._refresh_checkboxes_display()
-        self.status_label.config(text=f"已選取所有 {len(paths_to_select)} 個 QR Code 項目。")
+        if not paths_to_select:
+            messagebox.showinfo("提示", "目前沒有可自動標記的新廣告圖。", parent=self)
+            return
 
-    def _move_selected_to_ad_library(self):
+        self.selected_files.update(paths_to_select)
+        self._refresh_all_checkboxes()
+        self.status_label.config(text=f"已自動選取所有 {len(paths_to_select)} 個 QR Code 項目。")
+        
+    def _get_unique_ad_path(self, source_path: str, ad_dir: str) -> str:
+        base, extension = os.path.splitext(os.path.basename(source_path))
+        new_base = f"ad_{base}"
+        target_path = os.path.join(ad_dir, f"{new_base}{extension}")
+        i = 1
+        while os.path.exists(target_path):
+            target_path = os.path.join(ad_dir, f"{new_base}({i}){extension}")
+            i += 1
+        return target_path
+
+    def _move_selected_to_ad_library(self) -> None:
         selected_paths = list(self.selected_files)
         if not selected_paths:
-            messagebox.showinfo("沒有選取", "請先在列表中勾選要移入廣告庫的圖片。", parent=self)
+            messagebox.showinfo("沒有選取", "請先勾選要移入廣告庫的圖片。", parent=self)
             return
 
         ad_folder_path = self.config.get('ad_folder_path')
@@ -1816,54 +2017,82 @@ class MainWindow(tk.Tk):
             messagebox.showerror("錯誤", "廣告圖片資料夾路徑無效，請在設定中指定一個有效的資料夾。", parent=self)
             return
 
-        if not messagebox.askyesno("確認移動", f"確定要將選中的 {len(selected_paths)} 個檔案移動到廣告庫嗎？\n目的地：'{os.path.basename(ad_folder_path)}'\n\n檔案將被移動並重新命名為 ee(xxx) 格式，並保留原始副檔名。", parent=self):
+        if not messagebox.askyesno("確認移動", f"確定要將選中的 {len(selected_paths)} 個檔案移動到廣告庫嗎？\n目的地：'{os.path.basename(ad_folder_path)}'\n\n檔案將從原位置移動。", parent=self):
             return
 
-        moved_count = 0
-        failed_moves = []
+        moved_count, failed_moves = 0, 0
+        items_to_remove_from_gui = []
 
         for path in selected_paths:
             try:
-                _, extension = os.path.splitext(path)
-                i = 1
-                while True:
-                    new_name = f"ee({i}){extension}"
-                    dest_path = os.path.join(ad_folder_path, new_name)
-                    if not os.path.exists(dest_path):
-                        break
-                    i += 1
-                
+                dest_path = self._get_unique_ad_path(path, ad_folder_path)
                 shutil.move(path, dest_path)
                 log_info(f"已將檔案 '{path}' 移動到 '{dest_path}'")
+                items_to_remove_from_gui.append(path)
                 moved_count += 1
             except Exception as e:
                 log_error(f"移動檔案 '{path}' 到廣告庫失敗: {e}", True)
-                failed_moves.append(os.path.basename(path))
+                failed_moves += 1
 
         if moved_count > 0:
-            messagebox.showinfo("移動完成", f"成功移動 {moved_count} 個檔案到廣告庫。", parent=self)
-            self.all_found_items = [(p1, p2, v) for p1, p2, v in self.all_found_items if p2 not in selected_paths]
+            self.all_found_items = [(p1, p2, v) for p1, p2, v in self.all_found_items if p2 not in items_to_remove_from_gui]
             self.selected_files.clear()
             self._process_scan_results([])
+            messagebox.showinfo("移動完成", f"成功移動 {moved_count} 個檔案到廣告庫。", parent=self)
 
-        if failed_moves:
-            messagebox.showerror("移動失敗", f"以下 {len(failed_moves)} 個檔案移動失敗：\n\n{', '.join(failed_moves)}\n\n詳情請見 error_log.txt。", parent=self)
+        if failed_moves > 0:
+            messagebox.showerror("移動失敗", f"有 {failed_moves} 個檔案移動失敗，詳情請見 error_log.txt。", parent=self)
 
     def _delete_selected_from_disk(self) -> None:
-        if not self.selected_files or not messagebox.askyesno("確認刪除", f"確定要將 {len(self.selected_files)} 個圖片移至回收桶嗎？"): return
-        deleted_count, failed_count = 0, 0
-        items_to_remove_from_data = list(self.selected_files)
-        for path in items_to_remove_from_data:
+        if not self.selected_files:
+            messagebox.showinfo("沒有選取", "請先勾選要移至回收桶的圖片。", parent=self)
+            return
+            
+        if not messagebox.askyesno("確認刪除", f"確定要將 {len(self.selected_files)} 個圖片移至回收桶嗎？"):
+            return
+
+        root_folder = self.config.get('root_scan_folder')
+        ad_folder = self.config.get('ad_folder_path')
+        cache_manager = ScannedImageCacheManager(root_folder, ad_folder) if root_folder else None
+        if not root_folder:
+            log_error("無法更新快取，因為根掃描資料夾未設定。")
+
+        deleted_count, failed_count, skipped_count = 0, 0, 0
+        paths_to_delete = list(self.selected_files)
+
+        for path in paths_to_delete:
+            if path in self.protected_paths:
+                skipped_count += 1
+                continue
+
             if self._send2trash(path):
                 deleted_count += 1
                 self.selected_files.discard(path)
                 if path in self.all_file_data: del self.all_file_data[path]
-            else: failed_count += 1
-        if failed_count > 0: messagebox.showerror("刪除失敗", f"有 {failed_count} 個檔案刪除失敗。詳情請查看 error_log.txt。")
+                if cache_manager: cache_manager.remove_data(path)
+            else:
+                failed_count += 1
+        
+        if cache_manager: cache_manager.save_cache()
+
+        msg_parts = []
         if deleted_count > 0:
-            self.all_found_items = [(p1, p2, v) for p1, p2, v in self.all_found_items if p1 not in items_to_remove_from_data and p2 not in items_to_remove_from_data]
+            msg_parts.append(f"成功將 {deleted_count} 個檔案移至回收桶。")
+        if skipped_count > 0:
+            msg_parts.append(f"{skipped_count} 個檔案因受保護（群組基準）而未被刪除。")
+        if failed_count > 0:
+            messagebox.showerror("刪除失敗", f"有 {failed_count} 個檔案刪除失敗。詳情請查看 error_log.txt。")
+
+        if not msg_parts:
+            msg = "所有選中項目均為受保護的群組基準，無可刪除的檔案。"
+        else:
+            msg = "\n".join(msg_parts)
+
+        if deleted_count > 0:
+            self.all_found_items = [(p1, p2, v) for p1, p2, v in self.all_found_items if p1 not in paths_to_delete and p2 not in paths_to_delete]
             self._process_scan_results([])
-            messagebox.showinfo("刪除完成", f"成功將 {deleted_count} 個文件移至回收桶。")
+
+        messagebox.showinfo("刪除完成", msg, parent=self)
 
     def _send2trash(self, path: str) -> bool:
         try: send2trash.send2trash(os.path.abspath(path)); return True
@@ -1917,8 +2146,8 @@ class MainWindow(tk.Tk):
         item_id = self.tree.identify_row(event.y)
         if hasattr(self, 'tooltip_item_id') and self.tooltip_item_id == item_id: return
         if self.tooltip: self.tooltip.leave(); self.tooltip = None; self.tooltip_item_id = None
-        if item_id and 'ad_parent_item' in self.tree.item(item_id, "tags"):
-            self.tooltip = Tooltip(self.tree, "廣告圖片 (基準，不會被刪除)"); self.tooltip.enter(event)
+        if item_id and 'protected_parent' in self.tree.item(item_id, "tags"):
+            self.tooltip = Tooltip(self.tree, "廣告圖片 (基準，受保護不會被刪除)"); self.tooltip.enter(event)
             self.tooltip_item_id = item_id
 
     def _on_closing(self) -> None:
@@ -1965,5 +2194,4 @@ if __name__ == '__main__':
     from multiprocessing import freeze_support
     freeze_support()
     main()
-# Generated code
-#版本12.9.12完结
+#版本13.1.0完结
