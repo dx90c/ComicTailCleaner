@@ -31,14 +31,14 @@
 此模式會產生一個包含主程式 EXE 及所有依賴檔案的資料夾，**啟動速度較快**。
 
 ```cmd
-pyinstaller --noconfirm --clean --windowed --icon="icon.ico" --add-data "config.json;." --hidden-import=psutil --copy-metadata=psutil --hidden-import=Pillow --hidden-import=imagehash --hidden-import=send2trash --hidden-import=cv2 --hidden-import=numpy --hidden-import=scipy --hidden-import=six --hidden-import=pywt --copy-metadata=Pillow --copy-metadata=imagehash --copy-metadata=send2trash --copy-metadata=opencv-python --copy-metadata=numpy --copy-metadata=scipy --copy-metadata=six --copy-metadata=PyWavelets --collect-all=imagehash --collect-all=scipy "ComicTailCleaner.py"
+pyinstaller --noconfirm --clean --windowed --add-data "config.json;." --hidden-import=psutil --copy-metadata=psutil --hidden-import=Pillow --hidden-import=imagehash --hidden-import=send2trash --hidden-import=cv2 --hidden-import=numpy --hidden-import=scipy --hidden-import=six --hidden-import=pywt --copy-metadata=Pillow --copy-metadata=imagehash --copy-metadata=send2trash --copy-metadata=opencv-python --copy-metadata=numpy --copy-metadata=scipy --copy-metadata=six --copy-metadata=PyWavelets --collect-all=imagehash --collect-all=scipy "ComicTailCleaner.py"
 ```
 
 ##### **模式二：單檔案模式 (One-File)**
 此模式會將所有內容打包成一個獨立的 EXE 檔案，**便於分享**，但首次啟動較慢。
 
 ```cmd
-pyinstaller --noconfirm --clean --windowed --onefile --icon="icon.ico" --add-data "config.json;." --hidden-import=psutil --copy-metadata=psutil --hidden-import=Pillow --hidden-import=imagehash --hidden-import=send2trash --hidden-import=cv2 --hidden-import=numpy --hidden-import=scipy --hidden-import=six --hidden-import=pywt --copy-metadata=Pillow --copy-metadata=imagehash --copy-metadata=send2trash --copy-metadata=opencv-python --copy-metadata=numpy --copy-metadata=scipy --copy-metadata=six --copy-metadata=PyWavelets --collect-all=imagehash --collect-all=scipy "ComicTailCleaner.py"
+pyinstaller --noconfirm --clean --windowed --onefile --add-data "config.json;." --hidden-import=psutil --copy-metadata=psutil --hidden-import=Pillow --hidden-import=imagehash --hidden-import=send2trash --hidden-import=cv2 --hidden-import=numpy --hidden-import=scipy --hidden-import=six --hidden-import=pywt --copy-metadata=Pillow --copy-metadata=imagehash --copy-metadata=send2trash --copy-metadata=opencv-python --copy-metadata=numpy --copy-metadata=scipy --copy-metadata=six --copy-metadata=PyWavelets --collect-all=imagehash --collect-all=scipy "ComicTailCleaner.py"
 ```
 
 ---
