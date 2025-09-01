@@ -1,7 +1,6 @@
-
 # ======================================================================
-# 檔案名稱：ComicTailCleaner_v14.0.0.py
-# 版本號：14.0.0 
+# 檔案名稱：ComicTailCleaner_v14.2.1.py
+# 版本號：14.2.1 (雙哈希LSH引擎與穩定性修正版)
 # 專案名稱：ComicTailCleaner (漫畫尾頁廣告清理)
 #
 # === 程式說明 ===
@@ -9,17 +8,32 @@
 # 它能高效地掃描大量漫畫檔案，並通過感知哈希算法找出內容上
 # 相似或完全重複的圖片，提升漫畫閱讀體驗。
 #
-# === 14.0.0 版本更新內容 ===
-# - 【UI交互最終重構】基於 v13.3.x 奠定的穩定架構，實現一套完美的交互：
-#   - 統一的UI模型：嚴格實現“虛擬父項 + 平級子項”結構，父項作為純粹的容器。
-#   - 聚合狀態顯示：父項勾選框能正確顯示其下子項的聚合狀態 (☐ 未選 / ☑ 全選 / ◪ 部分選)。
-#   - 直覺的交互邏輯：
-#     - 點擊父項勾選框可“全選/全不選”其下所有子項。
-#     - 點擊子項勾選區可獨立控制單項。
-#     - 嚴格區分“勾選操作”與“高亮導航”的點擊區域。
-#   - 健壯的狀態管理：所有勾選操作均修改唯一的資料來源 (Set)，再由獨立的刷新函數
-#     單向更新UI，杜絕狀態衝突。
-#   - 交互完善：補全了雙擊、Enter鍵展開/收合群組等便捷操作。
+# === 14.1.0 ~ 14.2.1 版本更新內容 ===
+# - 【核心引擎升級】引入 LSH 雙哈希驗證機制，大幅提升比對精度與效率：
+#   - pHash 海選：掃描階段只計算 pHash，速度極快。
+#   - LSH 候選加速：利用局部敏感哈希 (LSH) 建立索引，將比對範圍從“全庫掃描”縮小為“少量高潛力候選”，性能指數級提升。
+#   - wHash 懶算復核：僅在 pHash 相似度落入“不確定區” (85-93%) 時，才“懶加載”並計算原理不同的 wHash 進行二次驗證，精準剔除“看著不像”的誤報。
+#   - 性能與精度兼得：用戶設定高相似度(>93%)時，流程極快；設定低相似度時，結果依然可靠。
+#
+# - 【廣告比對修正】引入“集團搜索”邏輯，解決相似廣告導致的重複與漏報問題：
+#   - 廣告預處理：在比對前先對廣告庫內部分組，將相似廣告（如不同QR碼版本）視為一個整體。
+#   - 集團驗證：使用廣告組“領隊”進行LSH初篩，但用組內“全體成員”對候選目標進行最終確認，確保不因代表差異而錯過匹配。
+#
+# - 【數據完整性修正】
+#   - 徹底隔離掃描數據：修復了因共享變數導致漫畫庫數據被廣告庫數據意外覆蓋的致命Bug，確保了比對範圍的絕對正確。
+#   - 全面路徑正規化：統一了所有從磁碟讀取路徑的格式，根除了因路徑分隔符 `\` 和 `/` 混用導致的重複顯示問題。
+#
+# - 【UI/UX 穩定性優化】
+#   - 固定預覽面板佈局：透過固定高度容器，徹底解決了預覽圖因下方路徑文字換行而忽大忽小、畫面跳動的問題。
+#   - 恢復原生鍵盤導航：移除了有缺陷的自訂導航，恢復了Treeview原生、流暢的上下方向鍵瀏覽體驗。
+#   - 強化資料夾開啟邏輯：現在無論檔案是否已被刪除，雙擊路徑或單擊預覽圖都能成功打開其所在的資料夾。
+#
+# - 【健壯性修正】
+#   - 完善刪除邏輯：確保刪除操作（無論成功或失敗）後，能正確更新UI、圖片快取和資料夾狀態快取，杜絕“鬼影”項目殘留。
+#   - 強化設定檔讀寫：增加了防呆設計，即使設定檔缺少特定項目或UI輸入為空，程式也能安全讀寫，避免崩潰。
+#
+# === 14.0.0 版本歷史 ===
+# - 【UI交互最終重構】基於 v13.3.x 奠定的穩定架構，實現了一套完美的 AllDup 風格交互。
 #
 # === 13.x 版本歷史 ===
 # - 13.3.0: 建立UI架構基線，簡化交互以確保穩定性。
@@ -74,18 +88,37 @@ except ImportError:
 
 # === 3. Tkinter GUI 庫導入 ===
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, filedialog, messagebox, font # <--- 也可以這樣合併
 from tkinter import filedialog
 from tkinter import messagebox
 
-# === 4. 全局常量和設定 ===
-APP_VERSION = "14.0.0"
+# === 4. 全局常量和設定 (更新) ===
+APP_VERSION = "14.2.1" # 更新版本號以標記雙哈希LSH優化
 APP_NAME_EN = "ComicTailCleaner"
 APP_NAME_TC = "漫畫尾頁廣告清理"
 CONFIG_FILE = "config.json"
 QR_SCAN_ENABLED = False
 PERFORMANCE_LOGGING_ENABLED = False
 CACHE_LOCK = threading.Lock()
+
+# === 5. 雙哈希 LSH 相關常數和工具函數 (新增) ===
+HASH_BITS = 64
+PHASH_FAST_THRESH   = 0.80   # <--- 修正於此，與UI的下限保持一致
+PHASH_STRICT_SKIP   = 0.93
+WHASH_TIER_1        = 0.90   # pHash 0.90~0.93 區間，wHash 需 >= 0.90
+WHASH_TIER_2        = 0.92   # pHash 0.88~0.90 區間，wHash 需 >= 0.92
+WHASH_TIER_3        = 0.95   # pHash 0.80~0.88 區間，wHash 需 >= 0.95
+WHASH_TIER_4        = 0.98   # [新增] 對應 pHash 區間: 0.80 <= sim_p < 0.85
+
+LSH_BANDS = 4  # 4 × 16bit 分段
+
+def sim_from_hamming(d: int, bits: int = HASH_BITS) -> float:
+    """將海明距離轉換為相似度 (0.0 到 1.0)"""
+    return 1.0 - (d / bits)
+
+def hamming_from_sim(sim: float, bits: int = HASH_BITS) -> int:
+    """將相似度轉換為海明距離（用於計算相似度下限對應的距離上限）"""
+    return max(0, int(round((1.0 - sim) * bits)))
 
 # === 5. 工具函數 (Helper Functions) ===
 def log_error(message: str, include_traceback: bool = False):
@@ -243,8 +276,9 @@ def _pool_worker_detect_qr_code(image_path: str, resize_size: int) -> tuple[str,
         return (image_path, {'error': f"OpenCV 處理失敗 {image_path}: {e}"})
     except Exception as e:
         return (image_path, {'error': f"QR檢測失敗 {image_path}: {e}"})
-
-def _pool_worker_process_image_full(image_path: str, resize_size: int) -> tuple[str, dict | None]:
+##12
+# 替換原有的 _pool_worker_process_image
+def _pool_worker_process_image_phash_only(image_path: str):
     if not os.path.exists(image_path):
         return (image_path, {'error': f"圖片檔案不存在: {image_path}"})
     try:
@@ -252,38 +286,17 @@ def _pool_worker_process_image_full(image_path: str, resize_size: int) -> tuple[
             if not img or img.width == 0 or img.height == 0:
                 return (image_path, {'error': f"圖片尺寸異常或無法讀取: {image_path}"})
             img = ImageOps.exif_transpose(img)
-            phash_val = imagehash.phash(img, hash_size=8)
-            resized_img = img.copy()
-            resized_img.thumbnail((resize_size, resize_size), Image.Resampling.LANCZOS)
-            qr_points_val = _detect_qr_on_image(resized_img)
-            if not qr_points_val:
-                qr_points_val = _detect_qr_on_image(img)
-        stat_info = os.stat(image_path)
-        return (image_path, {
-            'phash': phash_val, 'qr_points': qr_points_val,
-            'size': stat_info.st_size, 'ctime': stat_info.st_ctime, 'mtime': stat_info.st_mtime
-        })
-    except UnidentifiedImageError:
-        return (image_path, {'error': f"無法識別圖片格式: {image_path}"})
-    except (cv2.error, ValueError) as e:
-        return (image_path, {'error': f"OpenCV 處理失敗 {image_path}: {e}"})
+            ph = imagehash.phash(img, hash_size=8)  # 64-bit
+            st = os.stat(image_path)
+            return (image_path, {
+                'phash': ph, 'size': st.st_size, 'ctime': st.st_ctime, 'mtime': st.st_mtime
+            })
     except Exception as e:
-        return (image_path, {'error': f"完整圖片處理失敗 {image_path}: {e}"})
+        return (image_path, {'error': f"處理 pHash 失敗 {image_path}: {e}"})
 
-def _pool_worker_compare_hashes(work_chunk) -> list:
-    i_start, i_end, unique_hashes, hash_groups, max_diff = work_chunk
-    found = []
-    for i in range(i_start, i_end):
-        hash1 = unique_hashes[i]
-        for j in range(i + 1, len(unique_hashes)):
-            hash2 = unique_hashes[j]
-            if hash1 - hash2 <= max_diff:
-                sim = (1 - (hash1 - hash2) / 64) * 100
-                for path1 in hash_groups[hash1]:
-                    for path2 in hash_groups[hash2]: 
-                        found.append((min(path1, path2), max(path1, path2), f"{sim:.1f}%"))
-    return found
+##12
 
+##12
 # === 6. 配置管理相關函數 ===
 default_config = {
     'root_scan_folder': '', 'ad_folder_path': '', 'extract_count': 5,
@@ -323,7 +336,7 @@ def _sanitize_path_for_filename(path: str) -> str:
     # 移除或替換不合法字元
     sanitized = re.sub(r'[\\/*?:"<>|]', '_', basename)
     return sanitized
-
+###12
 class ScannedImageCacheManager:
     def __init__(self, root_scan_folder: str, ad_folder_path: str | None = None):
         sanitized_root = _sanitize_path_for_filename(root_scan_folder)
@@ -335,28 +348,36 @@ class ScannedImageCacheManager:
         
         self.cache_file_path = f"{base_name}.json"
         
-        # 處理檔名衝突
         counter = 1
         while os.path.exists(self.cache_file_path):
-            # 只有當路徑與現有快取的實際路徑不符時，才尋找新檔名
             try:
                 with open(self.cache_file_path, 'r', encoding='utf-8') as f:
-                    # 簡單檢查，假設快取內至少有一個條目
                     data = json.load(f)
                     first_key = next(iter(data), None)
+                    # 檢查快取是否與當前路徑匹配
                     if first_key and os.path.normpath(first_key).startswith(os.path.normpath(root_scan_folder)):
-                        break # 檔名匹配，使用現有檔案
+                        break
             except (json.JSONDecodeError, StopIteration, TypeError):
-                # 快取檔案損壞或為空，可以覆蓋
                 break
 
             self.cache_file_path = f"{base_name}_{counter}.json"
             counter += 1
-            if counter > 10: # 防止無限循環
+            if counter > 10:
                  log_error("快取檔名衝突過多，可能存在問題。")
                  break
 
         self.cache = self._load_cache()
+
+    def _normalize_loaded_data(self, data: dict) -> dict:
+        converted_data = data.copy()
+        for key in ['phash', 'whash']:
+            if key in converted_data and converted_data[key] is not None:
+                if not isinstance(converted_data[key], imagehash.ImageHash):
+                    try:
+                        converted_data[key] = imagehash.hex_to_hash(str(converted_data[key]))
+                    except (TypeError, ValueError):
+                        converted_data[key] = None
+        return converted_data
 
     def _load_cache(self) -> dict:
         if os.path.exists(self.cache_file_path):
@@ -365,22 +386,27 @@ class ScannedImageCacheManager:
                     loaded_data = json.load(f)
                     converted_cache = {}
                     for path, data in loaded_data.items():
+                        # 所有載入的路徑都進行標準化
+                        norm_path = os.path.normpath(path)
                         if isinstance(data, dict):
-                            converted_data = data.copy()
-                            for key in ['phash', 'whash']:
-                                if key in converted_data and converted_data[key] is not None:
-                                    try: converted_data[key] = imagehash.hex_to_hash(converted_data[key])
-                                    except (TypeError, ValueError): converted_data[key] = None
-                            converted_cache[path] = converted_data
+                            converted_cache[norm_path] = self._normalize_loaded_data(data)
+                        elif isinstance(data, str):
+                            converted_cache[norm_path] = self._normalize_loaded_data({'phash': data})
                     log_info(f"掃描圖片快取 '{self.cache_file_path}' 已成功載入。")
                     return converted_cache
-            except (json.JSONDecodeError, Exception):
-                log_info(f"掃描圖片快取檔案 '{self.cache_file_path}' 格式不正確，將重建。")
+            except (json.JSONDecodeError, Exception) as e:
+                log_info(f"掃描圖片快取檔案 '{self.cache_file_path}' 格式不正確或讀取失敗 ({e})，將重建。")
         return {}
+
     def save_cache(self) -> None:
         with CACHE_LOCK:
             max_retries = 3; retry_delay = 0.5
-            serializable_cache = {path: {k: str(v) if isinstance(v, imagehash.ImageHash) else v for k, v in data.items()} for path, data in self.cache.items() if data}
+            serializable_cache = {}
+            for path, data in self.cache.items():
+                if data:
+                    serializable_data = {k: str(v) if isinstance(v, imagehash.ImageHash) else v for k, v in data.items()}
+                    serializable_cache[path] = serializable_data
+
             for attempt in range(max_retries):
                 try:
                     os.makedirs(os.path.dirname(self.cache_file_path) or '.', exist_ok=True)
@@ -396,35 +422,42 @@ class ScannedImageCacheManager:
                         time.sleep(retry_delay)
                     else:
                         if 'messagebox' in globals():
-                            messagebox.showerror("快取保存失敗", f"無法保存快取檔案 '{self.cache_file_path}'，請檢查檔案權限或關閉占用檔案的程式（例如防毒軟體）。\n錯誤: {e}")
+                            messagebox.showerror("快取保存失敗", f"無法保存快取檔案 '{self.cache_file_path}'，請檢查檔案權限。\n錯誤: {e}")
                         break
+
     def get_data(self, file_path: str) -> dict | None:
-        return self.cache.get(file_path)
+        return self.cache.get(os.path.normpath(file_path))
+        
     def update_data(self, file_path: str, data: dict) -> None:
         if data and 'error' not in data:
-            if self.cache.get(file_path):
-                self.cache[file_path].update(data)
+            norm_path = os.path.normpath(file_path)
+            if self.cache.get(norm_path):
+                self.cache[norm_path].update(data)
             else:
-                self.cache[file_path] = data
+                self.cache[norm_path] = data
+
     def remove_data(self, file_path: str) -> bool:
         """從快取中移除單一檔案的紀錄"""
         with CACHE_LOCK:
-            if file_path in self.cache:
-                del self.cache[file_path]
-                log_info(f"[快取清理] 已從圖片快取中移除條目: {file_path}")
+            normalized_path = os.path.normpath(file_path)
+            if normalized_path in self.cache:
+                del self.cache[normalized_path]
+                log_info(f"[快取清理] 已從圖片快取中移除條目: {normalized_path}")
                 return True
             return False
+
     def remove_entries_from_folder(self, folder_path: str) -> int:
         with CACHE_LOCK:
             count = 0
             norm_folder_path = os.path.normpath(folder_path) + os.sep
-            keys_to_delete = [key for key in self.cache if os.path.normpath(key).startswith(norm_folder_path)]
+            keys_to_delete = [key for key in self.cache if key.startswith(norm_folder_path)]
             for key in keys_to_delete:
                 del self.cache[key]
                 count += 1
             if count > 0:
                 log_info(f"[快取清理] 已從圖片快取中移除屬於 '{folder_path}' 的 {count} 個條目。")
             return count
+
     def invalidate_cache(self) -> None:
         with CACHE_LOCK:
             self.cache = {}
@@ -432,16 +465,14 @@ class ScannedImageCacheManager:
                 try: 
                     log_info(f"[快取清理] 準備將圖片快取檔案 '{self.cache_file_path}' 移至回收桶。")
                     send2trash.send2trash(self.cache_file_path)
-                    log_info(f"[快取清理] 圖片快取檔案已成功移至回收桶。")
                 except Exception as e: 
                     log_error(f"刪除掃描快取檔案時發生錯誤: {e}", True)
                     try:
                         os.remove(self.cache_file_path)
-                        log_info(f"[快取清理] Fallback: 圖片快取檔案已被永久刪除。")
                     except Exception as e2:
                         log_error(f"Fallback 刪除掃描快取檔案失敗: {e2}", True)
 
-
+###12
 class FolderStateCacheManager:
     def __init__(self, root_scan_folder: str):
         sanitized_root = _sanitize_path_for_filename(root_scan_folder)
@@ -610,6 +641,7 @@ def _incremental_scan_traversal(root_folder: str, excluded_paths: set, time_filt
             continue
     
     return live_folders
+###
 
 def get_files_to_process(config: dict, image_cache: ScannedImageCacheManager, progress_queue: Queue | None = None, control_events: dict | None = None) -> list[str]:
     root_folder = config['root_scan_folder']
@@ -681,7 +713,11 @@ def get_files_to_process(config: dict, image_cache: ScannedImageCacheManager, pr
         try:
             files_in_folder = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(exts) and os.path.isfile(os.path.join(folder, f))]
             files_in_folder.sort()
-            extracted = files_in_folder[-count:] if enable_limit else files_in_folder
+            
+            # [核心修正] 在添加路徑時進行標準化
+            to_extract = files_in_folder[-count:] if enable_limit else files_in_folder
+            extracted = [os.path.normpath(p) for p in to_extract]
+            
             final_file_list.extend(extracted)
             files_from_scan += len(extracted)
             folder_cache.update_folder_state(folder, live_folders[folder]['mtime'], live_folders[folder]['ctime'])
@@ -700,17 +736,63 @@ def get_files_to_process(config: dict, image_cache: ScannedImageCacheManager, pr
         
         for folder, files in unchanged_files_by_folder.items():
             files.sort()
-            extracted = files[-count:] if enable_limit else files
+
+            # [核心修正] 從快取恢復路徑時也進行標準化
+            to_extract = files[-count:] if enable_limit else files
+            extracted = [os.path.normpath(p) for p in to_extract]
+            
             final_file_list.extend(extracted)
             files_from_cache += len(extracted)
 
+    folder_cache.save_cache()
+    # image_cache.save_cache() # 在此函數中此行是多餘的，已在後面處理
+
+    log_info(f"檔案提取完成。從掃描獲取: {files_from_scan}，從快取恢復: {files_from_cache}。總計: {len(final_file_list)}")
+    _update_progress(progress_queue, text=f"檔案提取完成，共 {len(final_file_list)} 個檔案待處理。")
+    
+    # [最終保障] 返回前確保整個列表是唯一的且標準化的
+    return sorted(list(set(final_file_list)))
+    #####
+
+    if unchanged_folders:
+        _update_progress(progress_queue, text=f"從快取讀取 {len(unchanged_folders)} 個資料夾的檔案列表...")
+        norm_unchanged_paths = {os.path.normpath(p) for p in unchanged_folders}
+        unchanged_files_by_folder = defaultdict(list)
+        for path in image_cache.cache.keys():
+            parent_dir = os.path.normpath(os.path.dirname(path))
+            if parent_dir in norm_unchanged_paths:
+                unchanged_files_by_folder[parent_dir].append(path)
+
+        removed_any = False
+        for folder, files in unchanged_files_by_folder.items():
+            files.sort()
+
+            # 先挑出要回填的清單（與你原本的 count / enable_limit 一致）
+            candidates = files[-count:] if enable_limit else files
+
+            # 對每個 path 檢查是否存在；不存在就從快取移除
+            filtered = []
+            for path in candidates:
+                if os.path.exists(path):            # ← 這兩行就是你問的「對每個 path 加」
+                    filtered.append(path)
+                else:
+                    image_cache.remove_data(path)   # ← 幽靈路徑同步從快取剔除
+                    removed_any = True
+
+            final_file_list.extend(filtered)
+            files_from_cache += len(filtered)
+
+        if removed_any:
+            image_cache.save_cache()  # 有刪才存，避免多餘 I/O
+
+    #####
     folder_cache.save_cache()
     image_cache.save_cache()
     
     log_info(f"檔案提取完成。從掃描獲取: {files_from_scan}，從快取恢復: {files_from_cache}。總計: {len(final_file_list)}")
     _update_progress(progress_queue, text=f"檔案提取完成，共 {len(final_file_list)} 個檔案待處理。")
     return final_file_list
-
+###
 # === 9. 核心比對引擎 ===
 class ImageComparisonEngine:
     def __init__(self, config: dict, progress_queue: Queue | None = None, control_events: dict | None = None):
@@ -752,7 +834,10 @@ class ImageComparisonEngine:
             self._update_progress(text="任務開始...")
             log_performance("[開始] 掃描任務")
             
-            scan_cache_manager = ScannedImageCacheManager(self.config['root_scan_folder'], self.config.get('ad_folder_path'))
+            # 根據模式決定根掃描資料夾和廣告資料夾路徑
+            root_scan_folder = self.config['root_scan_folder']
+            ad_folder_path = self.config.get('ad_folder_path') if self.config['comparison_mode'] in ['ad_comparison', 'qr_detection'] else None
+            scan_cache_manager = ScannedImageCacheManager(root_scan_folder, ad_folder_path)
             
             if not self.tasks_to_process:
                 initial_files = get_files_to_process(self.config, scan_cache_manager, self.progress_queue, self.control_events)
@@ -794,15 +879,22 @@ class ImageComparisonEngine:
         for path in current_task_list:
             try:
                 cached_data = cache_manager.get_data(path)
-                if cached_data and data_key in cached_data and abs(os.path.getmtime(path) - cached_data.get('mtime', 0)) < 1e-6:
+                
+                # 檢查快取是否有效 (哈希鍵存在且文件時間戳匹配)
+                if cached_data and data_key in cached_data and cached_data[data_key] and \
+                   abs(os.path.getmtime(path) - cached_data.get('mtime', 0)) < 1e-6:
                     self.file_data[path] = cached_data
                     cache_hits += 1
                     self.completed_task_count += 1
                 else:
                     paths_to_recalc.append(path)
-                    if cached_data: self.file_data[path] = cached_data
+                    if cached_data: self.file_data[path] = cached_data # 保留舊快取中的其他數據
             except FileNotFoundError:
                 log_info(f"檔案在處理過程中被移除: {path}")
+                try:
+                    cache_manager.remove_data(path)
+                except Exception: 
+                    pass
                 self.total_task_count = max(0, self.total_task_count - 1)
                 continue
 
@@ -830,8 +922,13 @@ class ImageComparisonEngine:
         
         async_results = []
         path_map = {}
+        # 根據 worker_function 的名稱來決定是否傳遞額外參數
+        worker_args = {}
+        if 'full' in worker_function.__name__ or 'qr_code' in worker_function.__name__:
+            worker_args['resize_size'] = self.config.get('qr_resize_size', 800)
+
         for path in paths_to_recalc:
-            res = self.pool.apply_async(worker_function, args=(path,))
+            res = self.pool.apply_async(worker_function, args=(path,), kwds=worker_args)
             async_results.append(res)
             path_map[res] = path
         
@@ -853,9 +950,9 @@ class ImageComparisonEngine:
                         if data.get('error'):
                             self.failed_tasks.append((path, data['error']))
                         else:
-                            self.file_data[path] = self.file_data.get(path, {})
-                            self.file_data[path].update(data)
-                            cache_manager.update_data(path, data)
+                            # 更新 self.file_data 並讓 cache_manager 知道數據已更新
+                            self.file_data.setdefault(path, {}).update(data)
+                            cache_manager.update_data(path, self.file_data[path])
                         self.completed_task_count += 1
                     except Exception as e:
                         path = path_map.get(res, "未知路徑")
@@ -878,137 +975,251 @@ class ImageComparisonEngine:
         cache_manager.save_cache()
         return True
 
-    def _find_similar_images(self, target_files: list[str], scan_cache_manager: ScannedImageCacheManager) -> tuple[list, dict] | None:
-        if not self._process_images_with_cache(target_files, scan_cache_manager, "目標雜湊", _pool_worker_process_image, 'phash'):
+    def _build_phash_band_index(self, gallery_file_data: dict, bands=LSH_BANDS):
+        seg_bits = HASH_BITS // bands
+        mask = (1 << seg_bits) - 1
+        index = [defaultdict(list) for _ in range(bands)]
+        
+        for path, ent in gallery_file_data.items():
+            phash_obj = ent.get('phash')
+            if not phash_obj: continue
+            try:
+                v = int(str(phash_obj), 16)
+            except (ValueError, TypeError):
+                continue
+            
+            for b in range(bands):
+                key = (v >> (b * seg_bits)) & mask
+                index[b][key].append(path)
+        return index
+
+    def _lsh_candidates_for(self, ad_path: str, ad_hash_obj: imagehash.ImageHash, index: list, bands=LSH_BANDS):
+        seg_bits = HASH_BITS // bands
+        mask = (1 << seg_bits) - 1
+        v = int(str(ad_hash_obj), 16)
+        cand = set()
+        for b in range(bands):
+            key = (v >> (b * seg_bits)) & mask
+            cand.update(index[b].get(key, []))
+        if ad_path in cand:
+            cand.remove(ad_path)
+        return cand
+
+    def _get_or_compute_whash(self, path: str, image_cache: ScannedImageCacheManager) -> imagehash.ImageHash | None:
+        ent = image_cache.get_data(path) or {}
+        whash_obj = ent.get('whash')
+        if whash_obj and isinstance(whash_obj, imagehash.ImageHash):
+            return whash_obj
+            
+        try:
+            with Image.open(path) as img:
+                img = ImageOps.exif_transpose(img)
+                wh = imagehash.whash(img, hash_size=8, mode='haar', remove_max_haar_ll=True)
+            image_cache.update_data(path, {'whash': wh, 'mtime': os.path.getmtime(path)})
+            # 同時更新自身的 file_data
+            self.file_data.setdefault(path, {}).update({'whash': wh})
+            return wh
+        except Exception as e:
+            log_error(f"懶算 wHash 失敗: {path}: {e}")
             return None
 
-        ad_file_data = {}
+    def _accept_pair_with_dual_hash(self, ad_hash_obj: imagehash.ImageHash, g_hash_obj: imagehash.ImageHash, ad_w_hash: imagehash.ImageHash, g_w_hash: imagehash.ImageHash) -> tuple[bool, float]:
+        d_p = ad_hash_obj - g_hash_obj
+        sim_p = sim_from_hamming(d_p)
+
+        if sim_p < PHASH_FAST_THRESH: return False, sim_p
+        if sim_p >= PHASH_STRICT_SKIP: return True, sim_p
+
+        if not (ad_w_hash and g_w_hash): return False, sim_p
+        
+        d_w = ad_w_hash - g_w_hash
+        sim_w = sim_from_hamming(d_w)
+
+        if sim_p >= 0.90:
+            ok = sim_w >= WHASH_TIER_1
+        elif sim_p >= 0.88:
+            ok = sim_w >= WHASH_TIER_2
+        elif sim_p >= 0.85:
+            ok = sim_w >= WHASH_TIER_3
+        else: # 此處現在只處理 0.80 <= sim_p < 0.85 的區間
+            ok = sim_w >= WHASH_TIER_4
+        
+        return (ok, min(sim_p, sim_w) if ok else sim_p)
+##12
+    def _find_similar_images(self, target_files: list[str], scan_cache_manager: ScannedImageCacheManager) -> tuple[list, dict] | None:
+        # === 步驟 1: 獨立掃描主要漫畫文件 (Gallery) ===
+        if not self._process_images_with_cache(target_files, scan_cache_manager, "目標雜湊", _pool_worker_process_image_phash_only, 'phash'):
+            return None
+        gallery_data = self.file_data.copy()
+
+        # === 步驟 2: 獨立掃描並預處理廣告文件 (Ads) ===
+        ad_data = {}
+        ad_cache_manager = None
+        leader_to_ad_group = {} # 用於存儲廣告組
+
         if self.config['comparison_mode'] == 'ad_comparison':
             ad_folder_path = self.config['ad_folder_path']
             if not os.path.isdir(ad_folder_path):
                 self._update_progress(text="錯誤：廣告圖片資料夾無效。"); return [], {}
-            ad_paths = [os.path.join(r, f) for r, _, fs in os.walk(ad_folder_path) for f in fs if f.lower().endswith(('.png','.jpg','.jpeg','.webp'))]
+            
+            ad_paths = [os.path.normpath(os.path.join(r, f)) for r, _, fs in os.walk(ad_folder_path) for f in fs if f.lower().endswith(('.png','.jpg','.jpeg','.webp'))]
             ad_cache_manager = ScannedImageCacheManager(ad_folder_path)
             
-            ad_engine = ImageComparisonEngine(self.config, self.progress_queue, self.control_events)
-            ad_engine.tasks_to_process = ad_paths
-            ad_engine.total_task_count = len(ad_paths)
-            if not ad_engine._process_images_with_cache(ad_paths, ad_cache_manager, "廣告圖片雜湊", _pool_worker_process_image, 'phash'):
+            self.file_data.clear()
+            if not self._process_images_with_cache(ad_paths, ad_cache_manager, "廣告圖片雜湊", _pool_worker_process_image_phash_only, 'phash'):
                 return None
-            ad_file_data = ad_engine.file_data
-            self.failed_tasks.extend(ad_engine.failed_tasks)
-            
-        all_file_data = {**self.file_data, **ad_file_data}
-        self._update_progress(text="🔍 圖片比對中...", p_type='progress', value=0)
-        max_diff = int((100 - self.config['similarity_threshold']) / 100 * 64)
-        
-        log_performance("[開始] 比對階段")
+            ad_data = self.file_data.copy()
 
-        if self.config['comparison_mode'] == 'ad_comparison':
-            found_items = []
-            ad_hashes = {path: data['phash'] for path, data in ad_file_data.items() if data and data.get('phash')}
-            total_comparisons = len(self.file_data)
-            for i, (target_path, target_data) in enumerate(self.file_data.items()):
-                if self._check_control() != 'continue': return None
-                if (i + 1) % 100 == 0:
-                    self._update_progress(p_type='progress', value=int((i+1)/total_comparisons*100), text=f"🔍 廣告比對中... ({i+1}/{total_comparisons})")
-                target_hash = target_data.get('phash')
-                if not target_hash: continue
-                for ad_path, ad_hash in ad_hashes.items():
-                    if ad_hash and target_hash - ad_hash <= max_diff:
-                        sim = (1 - (target_hash - ad_hash) / 64) * 100
-                        found_items.append((ad_path, target_path, f"{sim:.1f}%"))
-        
-        elif self.config['comparison_mode'] == 'mutual_comparison':
-            temp_found_pairs = []
-            hash_groups = defaultdict(list)
-            for path, data in self.file_data.items():
-                if data and data.get('phash'): hash_groups[data['phash']].append(path)
+            # --- [核心修正] 廣告預處理與分組 ---
+            self._update_progress(text="🔍 正在預處理廣告庫，分組相似廣告...")
+            ad_path_to_leader = {path: path for path in ad_data}
+            ad_paths_sorted = sorted(list(ad_data.keys()))
             
-            for h, paths in hash_groups.items():
-                if len(paths) > 1:
-                    base_path = min(paths)
-                    for other_path in paths:
-                        if base_path != other_path:
-                            temp_found_pairs.append((base_path, other_path, "100.0%"))
+            # [核心修正] 使用更合理的 PHASH_STRICT_SKIP (93%) 作為廣告分組閾值
+            grouping_threshold = hamming_from_sim(PHASH_STRICT_SKIP)
             
-            unique_hashes = list(hash_groups.keys())
-            n = len(unique_hashes)
-            self._update_progress(text=f"🔍 唯一雜湊互相比對中... (共 {n} 個)")
-            
-            comparison_procs = max(1, cpu_count() - 4)
-            chunk_factor = self.config.get('compare_chunk_factor', 16)
-            chunk_size = max(1, n // (comparison_procs * chunk_factor))
-            work_chunks = [(i, min(i + chunk_size, n), unique_hashes, hash_groups, max_diff) for i in range(0, n, chunk_size)]
-            
-            if not self.pool:
-                self.pool = Pool(processes=comparison_procs)
-            
-            async_results = [self.pool.apply_async(_pool_worker_compare_hashes, args=(chunk,)) for chunk in work_chunks]
+            # 使用一個較高的固定閾值 (95%) 來分組廣告
+            #grouping_threshold = hamming_from_sim(0.95)
+            for i in range(len(ad_paths_sorted)):
+                for j in range(i + 1, len(ad_paths_sorted)):
+                    p1_path, p2_path = ad_paths_sorted[i], ad_paths_sorted[j]
+                    h1, h2 = ad_data.get(p1_path, {}).get('phash'), ad_data.get(p2_path, {}).get('phash')
 
-            total_chunks = len(async_results)
-            completed_count = 0
-            while completed_count < total_chunks:
-                if self._check_control() != 'continue':
-                     self._cleanup_pool(); return None
-                
-                newly_completed_results = [res for res in async_results if res.ready()]
-                for res in newly_completed_results:
-                    temp_found_pairs.extend(res.get())
-                    async_results.remove(res)
-                    completed_count += 1
-
-                progress = int(completed_count / total_chunks * 100) if total_chunks > 0 else 100
-                if (completed_count % 10 == 0) or (completed_count == total_chunks):
-                    self._update_progress(p_type='progress', value=progress, text=f"🔍 唯一雜湊互相比對中... ({completed_count}/{total_chunks})")
-                time.sleep(0.1)
-
-            path_to_group_leader = {}
-            processed_paths = set()
-            
-            sorted_pairs = sorted(temp_found_pairs, key=lambda x: (x[0], x[1]))
-
-            for path1, path2, sim in sorted_pairs:
-                leader1 = path_to_group_leader.get(path1)
-                leader2 = path_to_group_leader.get(path2)
-
-                if leader1 and leader2:
-                    if leader1 != leader2:
+                    if h1 and h2 and (h1 - h2) <= grouping_threshold:
+                        leader1, leader2 = ad_path_to_leader[p1_path], ad_path_to_leader[p2_path]
                         final_leader = min(leader1, leader2)
-                        other_leader = max(leader1, leader2)
-                        for path, leader in path_to_group_leader.items():
-                            if leader == other_leader:
-                                path_to_group_leader[path] = final_leader
-                elif leader1:
-                    path_to_group_leader[path2] = leader1
-                elif leader2:
-                    path_to_group_leader[path1] = leader2
-                else:
-                    leader = min(path1, path2)
-                    path_to_group_leader[path1] = leader
-                    path_to_group_leader[path2] = leader
+                        # 更新並查集
+                        for path, leader in list(ad_path_to_leader.items()):
+                            if leader == leader1 or leader == leader2:
+                                ad_path_to_leader[path] = final_leader
+            
+            # 建立從領隊到整個群組的映射
+            for path, leader in ad_path_to_leader.items():
+                if leader not in leader_to_ad_group:
+                    leader_to_ad_group[leader] = []
+                leader_to_ad_group[leader].append(path)
+            
+            # 用於比對的 "ad_data" 現在是領隊的集合
+            ad_data_representatives = {path: data for path, data in ad_data.items() if path in leader_to_ad_group}
+            self._update_progress(text=f"🔍 廣告庫預處理完成，找到 {len(ad_data_representatives)} 個獨立廣告組。")
+            # --- 修正結束 ---
 
+        elif self.config['comparison_mode'] == 'mutual_comparison':
+            ad_data_representatives = gallery_data
+
+        # === 步驟 3: 建立 LSH 索引 ===
+        self._update_progress(text="🔍 建立 LSH 索引中...")
+        phash_index = self._build_phash_band_index(gallery_data)
+
+        temp_found_pairs = []
+        user_thresh = self.config.get('similarity_threshold', 95.0) / 100.0
+        total_ad_count = len(ad_data_representatives)
+        
+        log_performance("[開始] LSH 雙哈希比對階段")
+        
+        # === 步驟 4: 在隔離的、乾淨的數據集上執行比對 ===
+        for i, (ad_leader_path, ad_ent) in enumerate(ad_data_representatives.items()):
+            if self._check_control() != 'continue': return None
+            if (i + 1) % 50 == 0:
+                self._update_progress(p_type='progress', value=int((i+1)/total_ad_count*100), text=f"🔍 雙哈希 LSH 比對中... ({i+1}/{total_ad_count})")
+
+            ad_p_hash = ad_ent.get('phash')
+            if not ad_p_hash: continue
+            
+            candidate_paths = self._lsh_candidates_for(ad_leader_path, ad_p_hash, phash_index)
+
+            for g_path in candidate_paths:
+                if self.config['comparison_mode'] == 'mutual_comparison' and g_path <= ad_leader_path:
+                    continue
+                if self.config['comparison_mode'] == 'ad_comparison' and g_path in ad_data:
+                    continue
+
+                g_ent = gallery_data.get(g_path)
+                if not g_ent or not g_ent.get('phash'): continue
+                
+                # --- [核心修正] 集團搜索邏輯 ---
+                is_match_found = False
+                best_sim_val = 0.0
+                
+                # 獲取當前領隊代表的整個廣告組
+                ad_group_paths = leader_to_ad_group.get(ad_leader_path, [ad_leader_path])
+                
+                for ad_member_path in ad_group_paths:
+                    # 在廣告比對模式下，ad_data 來自 ad_cache_manager
+                    # 在互相比對模式下，ad_data 來自 gallery_data (scan_cache_manager)
+                    current_ad_cache = ad_cache_manager if self.config['comparison_mode'] == 'ad_comparison' else scan_cache_manager
+                    ad_member_ent = current_ad_cache.get_data(ad_member_path)
+                    if not ad_member_ent: continue
+                    
+                    ad_member_p_hash = ad_member_ent.get('phash')
+                    g_p_hash = g_ent.get('phash')
+
+                    if not ad_member_p_hash or not g_p_hash: continue
+
+                    d_p = ad_member_p_hash - g_p_hash
+                    sim_p = sim_from_hamming(d_p)
+
+                    if sim_p < PHASH_FAST_THRESH: continue
+                    
+                    is_accepted, final_sim_val = True, sim_p
+                    if sim_p < PHASH_STRICT_SKIP:
+                        ad_member_w_hash = self._get_or_compute_whash(ad_member_path, current_ad_cache)
+                        g_w_hash = self._get_or_compute_whash(g_path, scan_cache_manager)
+                        is_accepted, final_sim_val = self._accept_pair_with_dual_hash(ad_member_p_hash, g_p_hash, ad_member_w_hash, g_w_hash)
+
+                    if is_accepted and final_sim_val >= user_thresh:
+                        is_match_found = True
+                        best_sim_val = max(best_sim_val, final_sim_val) # 記錄最高的相似度
+                
+                if is_match_found:
+                    if self.config['comparison_mode'] == 'ad_comparison':
+                        temp_found_pairs.append((ad_leader_path, g_path, f"{best_sim_val * 100:.1f}%"))
+                    else: # mutual_comparison
+                        temp_found_pairs.append((min(ad_leader_path, g_path), max(ad_leader_path, g_path), f"{best_sim_val * 100:.1f}%"))
+                # --- 修正結束 ---
+
+        # === 步驟 5: 後處理與返回 ===
+        if self.config['comparison_mode'] == 'mutual_comparison':
+            path_to_group_leader = {}
+            for p1, p2, _ in sorted(temp_found_pairs):
+                leader1 = path_to_group_leader.get(p1, p1)
+                leader2 = path_to_group_leader.get(p2, p2)
+                final_leader = min(leader1, leader2)
+                for path, leader in list(path_to_group_leader.items()):
+                    if leader == leader1 or leader == leader2:
+                         path_to_group_leader[path] = final_leader
+                path_to_group_leader[p1] = final_leader
+                path_to_group_leader[p2] = final_leader
+            
             final_groups = defaultdict(list)
-            for path, leader in path_to_group_leader.items():
+            all_paths_in_pairs = set(p for pair in temp_found_pairs for p in pair[:2])
+            for path in all_paths_in_pairs:
+                leader = path_to_group_leader.get(path, path)
                 if path != leader:
                     final_groups[leader].append(path)
-            
+
             found_items = []
             for leader, children in final_groups.items():
                 for child in set(children):
-                    original_sim = "???"
-                    for p1, p2, sim_val in sorted_pairs:
-                        if (p1 == leader and p2 == child) or (p1 == child and p2 == leader):
-                            original_sim = sim_val
-                            break
-                    found_items.append((leader, child, original_sim))
+                    leader_hash = gallery_data.get(leader, {}).get('phash')
+                    child_hash = gallery_data.get(child, {}).get('phash')
+                    if leader_hash and child_hash:
+                        sim = sim_from_hamming(leader_hash - child_hash) * 100
+                        found_items.append((leader, child, f"{sim:.1f}%"))
+        else: # 廣告比對模式
+            found_items = temp_found_pairs
 
-        log_performance("[完成] 比對階段")
-        return found_items, all_file_data
-    
+        scan_cache_manager.save_cache()
+        if ad_cache_manager:
+            ad_cache_manager.save_cache()
+            
+        log_performance("[完成] LSH 雙哈希比對階段")
+        
+        self.file_data = {**gallery_data, **ad_data}
+        return found_items, self.file_data
+##12
     def _detect_qr_codes_pure(self, files_to_process: list[str], scan_cache_manager: ScannedImageCacheManager) -> tuple[list, dict] | None:
-        worker_func = partial(_pool_worker_detect_qr_code, resize_size=self.config.get('qr_resize_size', 800))
-        if not self._process_images_with_cache(files_to_process, scan_cache_manager, "QR Code 檢測", worker_func, 'qr_points'):
+        if not self._process_images_with_cache(files_to_process, scan_cache_manager, "QR Code 檢測", _pool_worker_detect_qr_code, 'qr_points'):
             return None
         
         found_qr_images = []
@@ -1016,81 +1227,72 @@ class ImageComparisonEngine:
             if data and data.get('qr_points'):
                 found_qr_images.append((image_path, image_path, "QR Code 檢出"))
         return found_qr_images, self.file_data
-
+##12
     def _detect_qr_codes_hybrid(self, files_to_process: list[str], scan_cache_manager: ScannedImageCacheManager) -> tuple[list, dict] | None:
-        self._update_progress(text="🧠 廣告快取載入中...")
         ad_folder_path = self.config['ad_folder_path']
         if not os.path.isdir(ad_folder_path):
             self._update_progress(text="混合模式錯誤：廣告資料夾無效。轉為純粹 QR 掃描...")
             log_info("退回純 QR 掃描，因廣告資料夾無效。")
             return self._detect_qr_codes_pure(files_to_process, scan_cache_manager)
         
-        ad_paths = [os.path.join(r, f) for r, _, fs in os.walk(ad_folder_path) for f in fs if f.lower().endswith(('.png','.jpg','.jpeg','.webp'))]
+        # [核心修正] 在此處對掃描到的廣告路徑進行正規化
+        ad_paths = [os.path.normpath(os.path.join(r, f)) for r, _, fs in os.walk(ad_folder_path) for f in fs if f.lower().endswith(('.png','.jpg','.jpeg','.webp'))]
         ad_cache_manager = ScannedImageCacheManager(ad_folder_path)
         
-        ad_engine = ImageComparisonEngine(self.config, self.progress_queue, self.control_events)
-        ad_engine.tasks_to_process = ad_paths
-        ad_engine.total_task_count = len(ad_paths)
-        worker_func_full = partial(_pool_worker_process_image_full, resize_size=self.config.get('qr_resize_size', 800))
-        if not ad_engine._process_images_with_cache(ad_paths, ad_cache_manager, "廣告圖片屬性", worker_func_full, 'qr_points'):
+        # 廣告圖片需要 pHash 和 qr_points
+        if not self._process_images_with_cache(ad_paths, ad_cache_manager, "廣告圖片屬性", _pool_worker_process_image_full, 'qr_points'):
             return None
-        ad_file_data = ad_engine.file_data
-        self.failed_tasks.extend(ad_engine.failed_tasks)
-        
+        ad_file_data = self.file_data.copy()
+
         ad_hashes = {path: data['phash'] for path, data in ad_file_data.items() if data and data.get('phash')}
         if not ad_hashes:
             log_info("廣告資料夾無有效哈希，退回純 QR 掃描模式。")
             return self._detect_qr_codes_pure(files_to_process, scan_cache_manager)
         self._update_progress(text=f"🧠 廣告快取載入完成 ({len(ad_hashes)} 筆)")
 
-        if not self._process_images_with_cache(files_to_process, scan_cache_manager, "目標雜湊", _pool_worker_process_image, 'phash'):
+        # 目標圖片只需要 pHash
+        self.file_data.clear()
+        if not self._process_images_with_cache(files_to_process, scan_cache_manager, "目標雜湊", _pool_worker_process_image_phash_only, 'phash'):
             return None
+        target_file_data = self.file_data.copy()
 
         found_items, remaining_files_for_qr = [], []
-        max_diff = int((100 - self.config['similarity_threshold']) / 100 * 64)
-        for path, data in self.file_data.items():
+        max_diff = hamming_from_sim(PHASH_STRICT_SKIP)
+        
+        for path, data in target_file_data.items():
             if self._check_control() != 'continue': return None
             target_hash = data.get('phash')
             if not target_hash:
                 remaining_files_for_qr.append(path); continue
-            match_found_and_skipped = False
+            
+            match_found = False
             for ad_path, ad_hash in ad_hashes.items():
                 if ad_hash and target_hash - ad_hash <= max_diff:
-                    ad_has_qr = ad_file_data.get(ad_path) and ad_file_data[ad_path].get('qr_points')
+                    ad_has_qr = ad_file_data.get(ad_path, {}).get('qr_points')
                     if ad_has_qr:
                         found_items.append((ad_path, path, "廣告匹配(快速)"))
-                        self.file_data.setdefault(path, {})['qr_points'] = ad_file_data[ad_path]['qr_points']
-                        match_found_and_skipped = True
-                    break
-            if not match_found_and_skipped:
+                        target_file_data.setdefault(path, {})['qr_points'] = ad_file_data[ad_path]['qr_points']
+                        match_found = True
+                        break 
+            if not match_found:
                 remaining_files_for_qr.append(path)
         
-        ad_match_count = len([it for it in found_items if it[2]=='廣告匹配(快速)'])
+        ad_match_count = len(found_items)
         self._update_progress(text=f"快速匹配完成，找到 {ad_match_count} 個廣告。對 {len(remaining_files_for_qr)} 個檔案進行 QR 掃描...")
         
         if remaining_files_for_qr:
             if self._check_control() != 'continue': return None
-            qr_engine = ImageComparisonEngine(self.config, self.progress_queue, self.control_events)
-            qr_engine.tasks_to_process = remaining_files_for_qr
-            qr_engine.total_task_count = len(remaining_files_for_qr)
-            
-            # 【錯誤修補 v13.0.0】增加對None的返回檢查
-            qr_result_tuple = qr_engine._detect_qr_codes_pure(remaining_files_for_qr, scan_cache_manager)
-            if qr_result_tuple is None:
-                return None # 任務被中斷
+            self.file_data = {p: d for p, d in target_file_data.items() if p in remaining_files_for_qr}
+            qr_result_tuple = self._detect_qr_codes_pure(remaining_files_for_qr, scan_cache_manager)
+            if qr_result_tuple is None: return None
             
             qr_results, qr_data = qr_result_tuple
-            
-            self.failed_tasks.extend(qr_engine.failed_tasks)
-            
-            existing_targets = {item[1] for item in found_items}
-            for qr_item in qr_results:
-                if qr_item[1] not in existing_targets:
-                    found_items.append(qr_item)
-            self.file_data.update(qr_data)
-        
-        all_file_data = {**self.file_data, **ad_file_data}
-        return found_items, all_file_data
+            found_items.extend(qr_results)
+            target_file_data.update(qr_data)
+
+        self.file_data = {**ad_file_data, **target_file_data}
+        return found_items, self.file_data
+##12
 #接續14.0.0第二部分
 
 # === 10. GUI 類別 ===
@@ -1289,7 +1491,8 @@ class SettingsGUI(tk.Toplevel):
                 'worker_processes': int(self.worker_processes_var.get()),
                 'enable_extract_count_limit': self.enable_extract_count_limit_var.get(),
                 'excluded_folders': [f.strip() for f in self.excluded_folders_text.get("1.0", tk.END).splitlines() if f.strip()],
-                'similarity_threshold': self.similarity_threshold_var.get(),
+                # --- 新的、更健-壯的程式碼 ---
+                'similarity_threshold': float(self.similarity_threshold_var.get()) if self.similarity_threshold_var.get() else 95.0,
                 'comparison_mode': self.comparison_mode_var.get(),
                 'enable_time_filter': self.enable_time_filter_var.get(),
                 'start_date_filter': self.start_date_var.get(),
@@ -1456,14 +1659,69 @@ class MainWindow(tk.Tk):
         vscroll=ttk.Scrollbar(parent_frame,orient="vertical",command=self.tree.yview);self.tree.configure(yscrollcommand=vscroll.set)
         vscroll.bind("<B1-Motion>", self._on_scroll)
         self.tree.pack(side=tk.LEFT,fill=tk.BOTH,expand=True);vscroll.pack(side=tk.RIGHT,fill=tk.Y)
-
+#####
+    # def _create_preview_panels(self, parent_frame: ttk.Frame) -> None:
+        # right_pane=ttk.Panedwindow(parent_frame,orient=tk.VERTICAL);right_pane.pack(fill=tk.BOTH,expand=True)
+        # self.target_image_frame=ttk.LabelFrame(right_pane,text="選中圖片預覽",padding="5");right_pane.add(self.target_image_frame,weight=1); self.target_image_label=ttk.Label(self.target_image_frame,cursor="hand2");self.target_image_label.pack(fill=tk.BOTH,expand=True); self.target_path_label=ttk.Label(self.target_image_frame,text="",wraplength=500);self.target_path_label.pack(fill=tk.X); self.target_image_label.bind("<Button-1>",lambda e:self._on_preview_image_click(e,True))
+        # self.compare_image_frame=ttk.LabelFrame(right_pane,text="群組基準圖片預覽",padding="5");right_pane.add(self.compare_image_frame,weight=1); self.compare_image_label=ttk.Label(self.compare_image_frame,cursor="hand2");self.compare_image_label.pack(fill=tk.BOTH,expand=True); self.compare_path_label=ttk.Label(self.compare_image_frame,text="",wraplength=500);self.compare_path_label.pack(fill=tk.X); self.compare_image_label.bind("<Button-1>",lambda e:self._on_preview_image_click(e,False))
+        # self.target_image_label.bind("<Configure>",self._on_preview_resize);self.compare_image_label.bind("<Configure>",self._on_preview_resize)
+        # self._create_context_menu()
+#####
     def _create_preview_panels(self, parent_frame: ttk.Frame) -> None:
         right_pane=ttk.Panedwindow(parent_frame,orient=tk.VERTICAL);right_pane.pack(fill=tk.BOTH,expand=True)
-        self.target_image_frame=ttk.LabelFrame(right_pane,text="選中圖片預覽",padding="5");right_pane.add(self.target_image_frame,weight=1); self.target_image_label=ttk.Label(self.target_image_frame,cursor="hand2");self.target_image_label.pack(fill=tk.BOTH,expand=True); self.target_path_label=ttk.Label(self.target_image_frame,text="",wraplength=500);self.target_path_label.pack(fill=tk.X); self.target_image_label.bind("<Button-1>",lambda e:self._on_preview_image_click(e,True))
-        self.compare_image_frame=ttk.LabelFrame(right_pane,text="群組基準圖片預覽",padding="5");right_pane.add(self.compare_image_frame,weight=1); self.compare_image_label=ttk.Label(self.compare_image_frame,cursor="hand2");self.compare_image_label.pack(fill=tk.BOTH,expand=True); self.compare_path_label=ttk.Label(self.compare_image_frame,text="",wraplength=500);self.compare_path_label.pack(fill=tk.X); self.compare_image_label.bind("<Button-1>",lambda e:self._on_preview_image_click(e,False))
-        self.target_image_label.bind("<Configure>",self._on_preview_resize);self.compare_image_label.bind("<Configure>",self._on_preview_resize)
+        
+        # --- 創建選中圖片預覽面板 ---
+        self.target_image_frame=ttk.LabelFrame(right_pane,text="選中圖片預覽",padding="5")
+        right_pane.add(self.target_image_frame,weight=1)
+        
+        self.target_image_label=ttk.Label(self.target_image_frame,cursor="hand2")
+        self.target_image_label.pack(fill=tk.BOTH,expand=True)
+        
+        # [核心修正] 創建一個固定高度的Frame來容納路徑標籤
+        # 1. 延遲獲取字體，確保窗口已初始化
+        try:
+            # 使用正確的 font 模組
+            label_font = font.nametofont(self.target_image_label.cget("font"))
+            line_height = label_font.metrics("linespace")
+        except tk.TclError:
+            # Fallback for initial setup
+            line_height = 16 
+        path_frame_height = line_height * 2 + 4 # 兩行文字的高度再加一點邊距
+        
+        # 2. 創建Frame並設定固定高度
+        target_path_container = tk.Frame(self.target_image_frame, height=path_frame_height)
+        target_path_container.pack(fill=tk.X, expand=False, pady=(5,0))
+        target_path_container.pack_propagate(False) # 关键：阻止Frame縮小以適應內容
+
+        # 3. 將路徑標籤放入固定高度的Frame中
+        self.target_path_label=ttk.Label(target_path_container,text="",wraplength=500, anchor="w", justify=tk.LEFT)
+        self.target_path_label.pack(fill=tk.BOTH, expand=True)
+        
+        self.target_image_label.bind("<Button-1>",lambda e:self._on_preview_image_click(e,True))
+
+        # --- 創建基準圖片預覽面板 (做同樣的修正) ---
+        self.compare_image_frame=ttk.LabelFrame(right_pane,text="群組基準圖片預覽",padding="5")
+        right_pane.add(self.compare_image_frame,weight=1)
+        
+        self.compare_image_label=ttk.Label(self.compare_image_frame,cursor="hand2")
+        self.compare_image_label.pack(fill=tk.BOTH,expand=True)
+
+        # 同样创建一个固定高度的Frame
+        compare_path_container = tk.Frame(self.compare_image_frame, height=path_frame_height)
+        compare_path_container.pack(fill=tk.X, expand=False, pady=(5,0))
+        compare_path_container.pack_propagate(False) # 关键
+
+        self.compare_path_label=ttk.Label(compare_path_container,text="",wraplength=500, anchor="w", justify=tk.LEFT)
+        self.compare_path_label.pack(fill=tk.BOTH, expand=True)
+
+        self.compare_image_label.bind("<Button-1>",lambda e:self._on_preview_image_click(e,False))
+        
+        # --- 綁定事件 ---
+        self.target_image_label.bind("<Configure>",self._on_preview_resize)
+        self.compare_image_label.bind("<Configure>",self._on_preview_resize)
         self._create_context_menu()
 
+#####
     def _create_bottom_buttons(self, parent_frame: ttk.Frame) -> None:
         button_frame = ttk.Frame(parent_frame)
         button_frame.pack(side=tk.LEFT, padx=5, pady=5)
@@ -1497,8 +1755,7 @@ class MainWindow(tk.Tk):
         self.tree.bind("<BackSpace>", lambda e: self._delete_selected_from_disk())
         self.tree.bind("<Motion>", self._on_mouse_motion)
         self.tooltip = None
-        self.tree.bind("<Up>", lambda e: self._navigate_image(e, "Up"))
-        self.tree.bind("<Down>", lambda e: self._navigate_image(e, "Down"))
+
 
     def open_settings(self) -> None:
         self.settings_button.config(state=tk.DISABLED)
@@ -1790,13 +2047,48 @@ class MainWindow(tk.Tk):
         else:
             self.tree.selection_set(item_id)
             self.tree.focus(item_id)
-            
+######    
+    # def _on_treeview_double_click(self, event: tk.Event) -> None:
+        # item_id = self.tree.identify_row(event.y)
+        # if not item_id or not self.tree.exists(item_id): return
+        # if 'parent_item' in self.tree.item(item_id, "tags"):
+            # self.tree.item(item_id, open=not self.tree.item(item_id, "open"))
+###
     def _on_treeview_double_click(self, event: tk.Event) -> None:
-        item_id = self.tree.identify_row(event.y)
-        if not item_id or not self.tree.exists(item_id): return
-        if 'parent_item' in self.tree.item(item_id, "tags"):
-            self.tree.item(item_id, open=not self.tree.item(item_id, "open"))
+        """處理在Treeview上的雙擊事件。"""
+        # 識別雙擊發生的區域
+        region = self.tree.identify_region(event.x, event.y)
+        
+        # 確保雙擊發生在一個有效的儲存格上
+        if region == "cell":
+            item_id = self.tree.identify_row(event.y)
+            if not item_id: return
 
+            # 情況一：如果雙擊在虛擬父項上，執行展開/收合 (此行為不變)
+            if 'parent_item' in self.tree.item(item_id, "tags"):
+                self.tree.item(item_id, open=not self.tree.item(item_id, "open"))
+                return
+
+            # 情況二：如果雙擊在子項或QR項的路徑欄上
+            column_id = self.tree.identify_column(event.x)
+            
+            # Treeview的欄位ID從#1開始計數，"path"是我們的第3個顯示欄位
+            if column_id == "#3": 
+                path_value = self.tree.item(item_id, "values")[2]
+                
+                # [核心修正] 不再檢查檔案是否存在，而是直接處理路徑字串
+                if path_value:
+                    # 從路徑字串中獲取資料夾名稱。
+                    # 這一步驟即使檔案已被刪除也能成功執行。
+                    folder_path = os.path.dirname(path_value)
+                    
+                    # 作為一個健壯性檢查，我們只驗證目標“資料夾”是否存在。
+                    if os.path.isdir(folder_path):
+                        self._open_folder(folder_path)
+                    else:
+                        # 如果連資料夾都不存在了，記錄一下日誌，但不打擾使用者。
+                        log_info(f"無法開啟資料夾，因為路徑 '{folder_path}' 不存在。")    
+######
     def _handle_return_key(self, event: tk.Event) -> str:
         selected_ids = self.tree.selection()
         if not selected_ids: return "break"
@@ -1809,7 +2101,9 @@ class MainWindow(tk.Tk):
         if self._after_id:
             self.after_cancel(self._after_id)
         self._after_id = self.after(self._preview_delay, self._trigger_async_preview)
-        
+
+####        
+
     def _trigger_async_preview(self) -> None:
         self._after_id = None
         selected = self.tree.selection()
@@ -1851,7 +2145,7 @@ class MainWindow(tk.Tk):
             self.compare_path_label.config(text="")
             self.pil_img_compare = None
             self._update_all_previews()
-
+####
     def _load_image_worker(self, path: str, label_widget: tk.Label, is_target: bool) -> None:
         try:
             with Image.open(path) as img:
@@ -1891,40 +2185,31 @@ class MainWindow(tk.Tk):
         
         if is_target: self.img_tk_target = img_tk
         else: self.img_tk_compare = img_tk
-
+#####
+    # def _on_preview_image_click(self, event: tk.Event, is_target_image: bool) -> None:
+        # text = (self.target_path_label if is_target_image else self.compare_path_label).cget("text")
+        # if text.startswith("路徑: "):
+            # path = text[len("路徑: "):].strip()
+            # if path and os.path.exists(path): self._open_folder(os.path.dirname(path))
+#####
     def _on_preview_image_click(self, event: tk.Event, is_target_image: bool) -> None:
         text = (self.target_path_label if is_target_image else self.compare_path_label).cget("text")
         if text.startswith("路徑: "):
-            path = text[len("路徑: "):].strip()
-            if path and os.path.exists(path): self._open_folder(os.path.dirname(path))
+            path_value = text[len("路徑: "):].strip()
+            
+            # [核心修正] 與雙擊路徑的邏輯保持完全一致
+            if path_value:
+                # 直接從路徑字串獲取資料夾，即使檔案已不存在
+                folder_path = os.path.dirname(path_value)
+                
+                # 只檢查資料夾是否存在
+                if os.path.isdir(folder_path):
+                    self._open_folder(folder_path)
+                else:
+                    log_info(f"無法開啟資料夾，因為路徑 '{folder_path}' 不存在。")
+#####
 
-    def _navigate_image(self, event: tk.Event, direction: str) -> str:
-        selected_ids = self.tree.selection()
-        if not selected_ids: return "break"
-        
-        current_id = selected_ids[0]
-        target_id = None
-
-        if direction == "Down":
-            children = self.tree.get_children(current_id)
-            if 'parent_item' in self.tree.item(current_id, "tags") and self.tree.item(current_id, "open") and children:
-                target_id = children[0]
-            else:
-                target_id = self.tree.next(current_id)
-        elif direction == "Up":
-            parent_id = self.tree.parent(current_id)
-            if parent_id and current_id == self.tree.get_children(parent_id)[0]:
-                target_id = parent_id
-            else:
-                target_id = self.tree.prev(current_id)
-
-        if target_id:
-            self.tree.selection_set(target_id)
-            self.tree.focus(target_id)
-            self.tree.see(target_id)
-        
-        return "break"
-
+####
     def _toggle_selection_by_item_id(self, item_id: str) -> None:
         tags = self.tree.item(item_id, "tags")
         if 'protected_item' in tags: return
@@ -1942,29 +2227,39 @@ class MainWindow(tk.Tk):
         parent_id = self.child_to_parent.get(item_id)
         if parent_id:
             self._update_group_checkbox(parent_id)
-        
+######        
+
     def _toggle_group_selection(self, parent_id: str):
         children = self.parent_to_children.get(parent_id, [])
         if not children: return
 
-        selectable_children = [
-            child_id for child_id in children 
-            if 'protected_item' not in self.tree.item(child_id, "tags")
+        # 獲取本群組內所有“可勾選”的子項路徑
+        selectable_paths_in_group = [
+            self.item_to_path.get(child_id)
+            for child_id in children
+            if 'protected_item' not in self.tree.item(child_id, "tags") and self.item_to_path.get(child_id)
         ]
-        
-        # Determine if all selectable children are currently selected
-        all_selected = all(self.item_to_path.get(child_id) in self.selected_files for child_id in selectable_children)
+        if not selectable_paths_in_group: return
 
-        # If all are selected, deselect all. Otherwise, select all.
-        for child_id in selectable_children:
-            path = self.item_to_path.get(child_id)
-            if all_selected:
+        # 計算本群組內“已勾選”的數量
+        selected_count_in_group = sum(1 for path in selectable_paths_in_group if path in self.selected_files)
+
+        # 判斷本群組是否已全選
+        is_fully_selected = selected_count_in_group == len(selectable_paths_in_group)
+
+        # 根據本群組的狀態，執行“純粹”的添加或移除操作
+        if is_fully_selected:
+            # 意圖：取消全選。從總列表中只移除本群組的路徑。
+            for path in selectable_paths_in_group:
                 self.selected_files.discard(path)
-            else:
+        else:
+            # 意圖：全選。向總列表中只添加本群組的路徑。
+            for path in selectable_paths_in_group:
                 self.selected_files.add(path)
-        
-        self._update_group_checkbox(parent_id)
 
+        # 最後，根據新的狀態刷新UI
+        self._update_group_checkbox(parent_id)
+######
     def _update_group_checkbox(self, parent_id: str):
         if not self.tree.exists(parent_id): return
         
@@ -2122,57 +2417,95 @@ class MainWindow(tk.Tk):
         if failed_moves > 0:
             messagebox.showerror("移動失败", f"有 {failed_moves} 個檔案移動失敗，詳情請見 error_log.txt。", parent=self)
 
+#######
     def _delete_selected_from_disk(self) -> None:
         if not self.selected_files:
             messagebox.showinfo("沒有選取", "請先勾選要移至回收桶的圖片。", parent=self)
             return
             
-        if not messagebox.askyesno("確認刪除", f"確定要將 {len(self.selected_files)} 個圖片移至回收桶嗎？"):
+        paths_to_delete = [p for p in self.selected_files if p not in self.protected_paths]
+        
+        if not paths_to_delete:
+            messagebox.showinfo("無需操作", "所有選中的項目均為受保護的檔案，\n沒有可移至回收桶的檔案。", parent=self)
+            return
+
+        if not messagebox.askyesno("確認刪除", f"確定要將 {len(paths_to_delete)} 個圖片移至回收桶嗎？"):
             return
 
         root_folder = self.config.get('root_scan_folder')
         ad_folder = self.config.get('ad_folder_path')
-        cache_manager = ScannedImageCacheManager(root_folder, ad_folder) if root_folder else None
-        if not root_folder:
-            log_error("無法更新快取，因為根掃描資料夾未設定。")
+        
+        image_cache_manager = ScannedImageCacheManager(root_folder, ad_folder) if root_folder else None
+        folder_cache_manager = FolderStateCacheManager(root_folder) if root_folder else None
 
-        deleted_count, failed_count, skipped_count = 0, 0, 0
-        paths_to_delete = list(self.selected_files)
+        deleted_count, failed_count = 0, 0
+        skipped_count = len(self.selected_files) - len(paths_to_delete)
+        
+        successfully_deleted_paths = []
+        modified_folders = set()
 
         for path in paths_to_delete:
-            if path in self.protected_paths:
-                skipped_count += 1
-                continue
-
             if self._send2trash(path):
                 deleted_count += 1
-                self.selected_files.discard(path)
-                if path in self.all_file_data: del self.all_file_data[path]
-                if cache_manager: cache_manager.remove_data(path)
+                successfully_deleted_paths.append(path)
+                modified_folders.add(os.path.dirname(path))
+                
+                if image_cache_manager:
+                    image_cache_manager.remove_data(path)
             else:
                 failed_count += 1
         
-        if cache_manager: cache_manager.save_cache()
+        if image_cache_manager:
+            image_cache_manager.save_cache()
+            
+        if folder_cache_manager and modified_folders:
+            log_info(f"[快取清理] 因檔案刪除，正在從資料夾快取中移除 {len(modified_folders)} 個條目...")
+            folder_cache_manager.remove_folders(list(modified_folders))
+            folder_cache_manager.save_cache()
 
-        msg_parts = []
+        # ... (訊息框顯示邏輯保持不變)
+        title = ""
+        message_parts = []
+        message_box_func = messagebox.showinfo
+
         if deleted_count > 0:
-            msg_parts.append(f"成功將 {deleted_count} 個檔案移至回收桶。")
+            message_parts.append(f"✅ 成功將 {deleted_count} 個檔案移至回收桶。")
         if skipped_count > 0:
-            msg_parts.append(f"{skipped_count} 個檔案因受保護而未被刪除。")
+            message_parts.append(f"🔒 {skipped_count} 個檔案因受保護而未被刪除。")
         if failed_count > 0:
-            messagebox.showerror("刪除失敗", f"有 {failed_count} 個檔案刪除失敗。詳情請查看 error_log.txt。")
+            message_parts.append(f"❌ {failed_count} 個檔案刪除失敗 (可能已被移動或不存在)，詳情請見 error_log.txt。")
 
-        if not msg_parts:
-            msg = "所有選中項目均為受保護的檔案，無可刪除的檔案。"
+        if not message_parts:
+            title = "無需操作"
+            final_message = "所有選中的項目均為受保護的檔案，沒有可刪除的項目。"
         else:
-            msg = "\n".join(msg_parts)
+            if failed_count > 0 and deleted_count > 0:
+                title = "部分完成"
+                message_box_func = messagebox.showwarning
+            elif failed_count > 0 and deleted_count == 0:
+                title = "刪除失敗"
+                message_box_func = messagebox.showerror
+            else:
+                title = "刪除完成"
+                message_box_func = messagebox.showinfo
+            final_message = "\n\n".join(message_parts)
+        message_box_func(title, final_message, parent=self)
+        # --- 訊息顯示結束 ---
 
-        if deleted_count > 0:
-            self.all_found_items = [(p1, p2, v) for p1, p2, v in self.all_found_items if p1 not in paths_to_delete and p2 not in paths_to_delete]
+        # [核心修復] 只要有任何刪除成功或失敗，都應該刷新UI
+        if deleted_count > 0 or failed_count > 0:
+            # 從核心資料列表中移除所有“嘗試過”刪除的項目（無論成敗）
+            # 因為成功的已經沒了，失敗的也證明不存在，都不應再顯示
+            self.all_found_items = [
+                (p1, p2, v) for p1, p2, v in self.all_found_items 
+                if p1 not in paths_to_delete and p2 not in paths_to_delete
+            ]
+            # 清理總選擇列表
+            self.selected_files.clear()
+            # 使用更新後的核心資料列表重繪整個UI
             self._process_scan_results([])
 
-        messagebox.showinfo("刪除完成", msg, parent=self)
-
+#######
     def _send2trash(self, path: str) -> bool:
         try: send2trash.send2trash(os.path.abspath(path)); return True
         except Exception as e: log_error(f"移至回收桶失敗 {path}: {e}", True); return False
