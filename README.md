@@ -1,4 +1,4 @@
-# ComicTailCleaner (漫畫尾頁廣告清理) v12.6.3
+# ComicTailCleaner (漫畫尾頁廣告清理)
 
 [![Latest Release](https://img.shields.io/github/v/release/dx90c/ComicTailCleaner?display_name=tag)](https://github.com/dx90c/ComicTailCleaner/releases/latest)
 
