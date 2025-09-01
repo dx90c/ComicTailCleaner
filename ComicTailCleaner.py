@@ -1,6 +1,7 @@
+
 # ======================================================================
-# 檔案名稱：ComicTailCleaner_v13.3.0.py
-# 版本號：13.3.0 (AllDup風格UI架構基線版)
+# 檔案名稱：ComicTailCleaner_v14.0.0.py
+# 版本號：14.0.0 
 # 專案名稱：ComicTailCleaner (漫畫尾頁廣告清理)
 #
 # === 程式說明 ===
@@ -8,18 +9,21 @@
 # 它能高效地掃描大量漫畫檔案，並通過感知哈希算法找出內容上
 # 相似或完全重複的圖片，提升漫畫閱讀體驗。
 #
-# === 13.3.0 版本更新內容 ===
-# - 【UI架構基線重構】為了建立一個穩定、可預測的開發基礎，對UI進行了簡化重構：
-#   - 實現AllDup風格架構：引入虛擬父項（群組標題）與平級子項，結構清晰。
-#   - 回歸原生交互：父項交互簡化為純粹的展開/收合，利用原生#0欄三角形，
-#     移除了所有自訂的父子聯動勾選邏輯和三態聚合顯示，以杜絕狀態衝突。
-#   - 健壯的鍵盤導航：基於新架構重寫了完整的方向鍵導航，確保流暢操作。
-#   - 清晰的點擊區域：嚴格區分點擊子項勾選區和導航區的行為。
-#   - 程式碼清理：移除了為實現複雜勾選邏輯而增加的冗餘映射和輔助函數，
-#     使程式碼更簡潔，為後續開發奠定穩定基礎。
+# === 14.0.0 版本更新內容 ===
+# - 【UI交互最終重構】基於 v13.3.x 奠定的穩定架構，實現一套完美的交互：
+#   - 統一的UI模型：嚴格實現“虛擬父項 + 平級子項”結構，父項作為純粹的容器。
+#   - 聚合狀態顯示：父項勾選框能正確顯示其下子項的聚合狀態 (☐ 未選 / ☑ 全選 / ◪ 部分選)。
+#   - 直覺的交互邏輯：
+#     - 點擊父項勾選框可“全選/全不選”其下所有子項。
+#     - 點擊子項勾選區可獨立控制單項。
+#     - 嚴格區分“勾選操作”與“高亮導航”的點擊區域。
+#   - 健壯的狀態管理：所有勾選操作均修改唯一的資料來源 (Set)，再由獨立的刷新函數
+#     單向更新UI，杜絕狀態衝突。
+#   - 交互完善：補全了雙擊、Enter鍵展開/收合群組等便捷操作。
 #
-# === 13.2.x 版本更新內容 ===
-# - 引入AllDup風格UI架構，並對UI交互進行了多次迭代修正。
+# === 13.x 版本歷史 ===
+# - 13.3.0: 建立UI架構基線，簡化交互以確保穩定性。
+# - 13.2.x: 引入UI架構的早期嘗試與迭代。
 # ======================================================================
 
 # === 1. 標準庫導入 (Python Built-in Libraries) ===
@@ -75,7 +79,7 @@ from tkinter import filedialog
 from tkinter import messagebox
 
 # === 4. 全局常量和設定 ===
-APP_VERSION = "13.3.0"
+APP_VERSION = "14.0.0"
 APP_NAME_EN = "ComicTailCleaner"
 APP_NAME_TC = "漫畫尾頁廣告清理"
 CONFIG_FILE = "config.json"
@@ -1087,6 +1091,7 @@ class ImageComparisonEngine:
         
         all_file_data = {**self.file_data, **ad_file_data}
         return found_items, all_file_data
+#接續14.0.0第二部分
 
 # === 10. GUI 類別 ===
 class Tooltip:
@@ -1343,7 +1348,6 @@ class MainWindow(tk.Tk):
         # 狀態變數
         self.protected_paths = set()
         self.child_to_parent = {}
-        # [PATCH v13.3.1] 恢復映射字典的初始化
         self.parent_to_children = defaultdict(list)
         self.item_to_path = {}
 
@@ -1434,7 +1438,6 @@ class MainWindow(tk.Tk):
 
     def _create_treeview(self, parent_frame: ttk.Frame) -> None:
         columns=("status","filename","path","count","size","ctime","similarity")
-        # [PATCH v13.3.1] 顯示原生#0欄位以放置三角形
         self.tree=ttk.Treeview(parent_frame,columns=columns,show="tree headings",selectmode="extended")
         
         self.tree.heading("#0", text="", anchor='center')
@@ -1446,6 +1449,7 @@ class MainWindow(tk.Tk):
         
         self.tree.tag_configure('child_item',foreground='#555555')
         self.tree.tag_configure('parent_item',font=self.bold_font)
+        self.tree.tag_configure('parent_partial_selection', foreground='#00008B') # DarkBlue for partial state
         self.tree.tag_configure('qr_item', background='#E0FFFF')
         self.tree.tag_configure('protected_item', background='#FFFACD')
         
@@ -1483,9 +1487,18 @@ class MainWindow(tk.Tk):
         ttk.Button(actions_frame,text="開啟回收桶",command=self._open_recycle_bin).pack(side=tk.LEFT,padx=2)
 
     def _bind_keys(self) -> None:
-        self.tree.bind("<<TreeviewSelect>>", self._on_item_select); self.tree.bind("<Button-1>", self._on_treeview_click); self.tree.bind("<Button-3>", self._show_context_menu)
-        self.tree.bind("<space>", self._toggle_selection); self.tree.bind("<Return>", self._toggle_selection); self.tree.bind("<Delete>", lambda e: self._delete_selected_from_disk()); self.tree.bind("<BackSpace>", lambda e: self._delete_selected_from_disk())
-        self.tree.bind("<Motion>", self._on_mouse_motion); self.tooltip = None; self.tree.bind("<Up>", lambda e: self._navigate_image(e, "Up")); self.tree.bind("<Down>", lambda e: self._navigate_image(e, "Down"))
+        self.tree.bind("<<TreeviewSelect>>", self._on_item_select)
+        self.tree.bind("<Button-1>", self._on_treeview_click)
+        self.tree.bind("<Double-1>", self._on_treeview_double_click)
+        self.tree.bind("<Button-3>", self._show_context_menu)
+        self.tree.bind("<space>", self._toggle_selection_with_space)
+        self.tree.bind("<Return>", self._handle_return_key)
+        self.tree.bind("<Delete>", lambda e: self._delete_selected_from_disk())
+        self.tree.bind("<BackSpace>", lambda e: self._delete_selected_from_disk())
+        self.tree.bind("<Motion>", self._on_mouse_motion)
+        self.tooltip = None
+        self.tree.bind("<Up>", lambda e: self._navigate_image(e, "Up"))
+        self.tree.bind("<Down>", lambda e: self._navigate_image(e, "Down"))
 
     def open_settings(self) -> None:
         self.settings_button.config(state=tk.DISABLED)
@@ -1522,9 +1535,9 @@ class MainWindow(tk.Tk):
         self.pause_event.clear()
         self.is_paused = False
         self.engine_instance = None
+        
         self.protected_paths.clear()
         self.child_to_parent.clear()
-        # [PATCH v13.3.1] 恢復映射字典的清理
         self.parent_to_children.clear()
         self.item_to_path.clear()
         
@@ -1560,7 +1573,8 @@ class MainWindow(tk.Tk):
         self.settings_button.config(state=tk.NORMAL)
         self.pause_button.config(state=tk.DISABLED, text="暫停")
         self.cancel_button.config(state=tk.DISABLED)
-        self._reset_scan_state()
+        # 這裡不重置 self.engine_instance 等狀態，因為任務可能只是完成而不是被重置
+#接續14.0.0第三部分
 
     def _check_queues(self) -> None:
         try:
@@ -1608,6 +1622,8 @@ class MainWindow(tk.Tk):
             if result is None:
                 if self.cancel_event.is_set():
                     self.scan_queue.put({'type': 'finish', 'text': "任務已取消"})
+                else: # Paused
+                    self.scan_queue.put({'type': 'status_update', 'text': "任務已暫停"})
                 return
 
             found_items, all_file_data, failed_tasks = result
@@ -1634,10 +1650,12 @@ class MainWindow(tk.Tk):
 
     def _process_scan_results(self, failed_tasks: list) -> None:
         self.tree.delete(*self.tree.get_children())
-        self.selected_files.clear()
         
+        # Keep selected_files, but clear UI-related state
         self._reset_scan_state()
-
+        # Repopulate selected_files in case it was a re-process
+        # selected_files should be persistent across re-draws unless a new scan starts
+        
         groups = defaultdict(list)
         for group_key, item_path, value_str in self.all_found_items:
             groups[group_key].append((item_path, value_str))
@@ -1680,28 +1698,34 @@ class MainWindow(tk.Tk):
         
         for group_key, items in groups_to_load:
             if group_key in self.banned_groups: continue
-            
+
+            # Handle simple QR code list items (no parent)
             is_qr_item = items and items[0][1] == "QR Code 檢出"
             if is_qr_item and mode == 'qr_detection' and not self.config.get('enable_qr_hybrid_mode'):
                 item_id = f"item_{uid}"; uid += 1
                 p_data = self.all_file_data.get(group_key, {})
                 p_size = f"{p_data.get('size', 0):,}" if 'size' in p_data else "N/A"
                 p_ctime = datetime.datetime.fromtimestamp(p_data.get('ctime')).strftime('%Y/%m/%d %H:%M') if p_data.get('ctime') else "N/A"
-                self.tree.insert("", "end", iid=item_id, values=("☐", os.path.basename(group_key), group_key, "", p_size, p_ctime, items[0][1]), tags=('qr_item',))
-                self.child_to_parent[item_id] = None 
+                
+                is_selected = group_key in self.selected_files
+                status_char = "☑" if is_selected else "☐"
+
+                self.tree.insert("", "end", iid=item_id, values=(status_char, os.path.basename(group_key), group_key, "", p_size, p_ctime, items[0][1]), tags=('qr_item',))
+                self.item_to_path[item_id] = group_key
                 continue
 
+            # Handle parent-child groups
             parent_id = f"group_{uid}"; uid += 1
             
             if mode == 'mutual_comparison':
                 display_list = [(group_key, "基準 (自身)")] + sorted(items, key=lambda x: x[0])
-            else:
+            else: # ad_comparison or hybrid_qr
                 display_list = [(group_key, "基準廣告")] + sorted(items, key=lambda x: x[0])
-
+            
             group_title = os.path.basename(group_key)
             count = len(display_list)
             self.tree.insert("", "end", iid=parent_id, open=True,
-                             values=("", group_title, f"({count} 個項目)", "", "", "", ""), 
+                             values=("", group_title, "", count, "", "", ""), 
                              tags=('parent_item',))
             
             for path, value_str in display_list:
@@ -1716,13 +1740,20 @@ class MainWindow(tk.Tk):
                 c_size = f"{c_data.get('size', 0):,}" if 'size' in c_data else "N/A"
                 c_ctime = datetime.datetime.fromtimestamp(c_data.get('ctime')).strftime('%Y/%m/%d %H:%M') if c_data.get('ctime') else "N/A"
                 
-                status_char = "🔒" if is_protected else "☐"
+                is_selected = path in self.selected_files
+                status_char = "🔒" if is_protected else ("☑" if is_selected else "☐")
                 
                 self.tree.insert(parent_id, "end", iid=child_id, 
                                  values=(status_char, f"  └─ {os.path.basename(path)}", path, "", c_size, c_ctime, value_str), 
                                  tags=tuple(tags))
+                
+                # Populate mappings
                 self.child_to_parent[child_id] = parent_id
+                self.parent_to_children[parent_id].append(child_id)
+                self.item_to_path[child_id] = path
 
+            self._update_group_checkbox(parent_id)
+            
         self.is_loading_page = False
     
     def _on_scroll(self, event: tk.Event) -> None:
@@ -1747,17 +1778,33 @@ class MainWindow(tk.Tk):
         if not item_id or not self.tree.exists(item_id): return
         
         tags = self.tree.item(item_id, "tags")
-
-        if 'parent_item' in tags:
-            self.tree.toggle(item_id)
-        elif 'child_item' in tags or 'qr_item' in tags:
-            column = self.tree.identify_column(event.x)
-            if column in ("#1", "#2"): 
+        column = self.tree.identify_column(event.x)
+        
+        # Checkbox/Filename click area triggers selection
+        if column in ("#1", "#2"): # Status or Filename column
+            if 'parent_item' in tags:
+                self._toggle_group_selection(item_id)
+            elif 'child_item' in tags or 'qr_item' in tags:
                 self._toggle_selection_by_item_id(item_id)
-            else:
-                self.tree.selection_set(item_id)
-                self.tree.focus(item_id)
+        # Any other click just focuses the item
+        else:
+            self.tree.selection_set(item_id)
+            self.tree.focus(item_id)
             
+    def _on_treeview_double_click(self, event: tk.Event) -> None:
+        item_id = self.tree.identify_row(event.y)
+        if not item_id or not self.tree.exists(item_id): return
+        if 'parent_item' in self.tree.item(item_id, "tags"):
+            self.tree.item(item_id, open=not self.tree.item(item_id, "open"))
+
+    def _handle_return_key(self, event: tk.Event) -> str:
+        selected_ids = self.tree.selection()
+        if not selected_ids: return "break"
+        item_id = selected_ids[0]
+        if 'parent_item' in self.tree.item(item_id, "tags"):
+            self.tree.item(item_id, open=not self.tree.item(item_id, "open"))
+        return "break"
+        
     def _on_item_select(self, event: tk.Event) -> None:
         if self._after_id:
             self.after_cancel(self._after_id)
@@ -1769,46 +1816,52 @@ class MainWindow(tk.Tk):
         if not selected or not self.tree.exists(selected[0]):
             self.target_path_label.config(text="")
             self.compare_path_label.config(text="")
+            self.pil_img_target = None
+            self.pil_img_compare = None
+            self._update_all_previews()
             return
+            
         item_id = selected[0]
         
         preview_path, compare_path = None, None
-        if 'parent_item' in self.tree.item(item_id, "tags"):
+        tags = self.tree.item(item_id, "tags")
+
+        if 'parent_item' in tags:
             children = self.tree.get_children(item_id)
             if children:
-                preview_path = self.tree.item(children[0], "values")[2]
-                self.compare_path_label.config(text="")
-            else:
-                preview_path = None
-        else:
-            preview_path = self.tree.item(item_id, "values")[2]
-            parent_id = self.tree.parent(item_id)
+                preview_path = self.item_to_path.get(children[0])
+                compare_path = None # Don't show compare image when parent is selected
+        else: # child or qr_item
+            preview_path = self.item_to_path.get(item_id)
+            parent_id = self.child_to_parent.get(item_id)
             if parent_id:
                 base_child_id = self.tree.get_children(parent_id)[0]
-                compare_path = self.tree.item(base_child_id, "values")[2]
-                self.executor.submit(self._load_image_worker, compare_path, self.compare_path_label, False)
-            else:
-                self.compare_path_label.config(text="")
+                compare_path = self.item_to_path.get(base_child_id)
 
         if preview_path: 
             self.executor.submit(self._load_image_worker, preview_path, self.target_path_label, True)
         else:
             self.target_path_label.config(text="")
-            
+            self.pil_img_target = None
+            self._update_all_previews()
+
+        if compare_path:
+            self.executor.submit(self._load_image_worker, compare_path, self.compare_path_label, False)
+        else:
+            self.compare_path_label.config(text="")
+            self.pil_img_compare = None
+            self._update_all_previews()
+
     def _load_image_worker(self, path: str, label_widget: tk.Label, is_target: bool) -> None:
         try:
             with Image.open(path) as img:
                 img = ImageOps.exif_transpose(img).convert('RGB')
-                label_widget.config(text=f"路徑: {path}")
                 self.preview_queue.put({'type': 'image_loaded', 'image': img.copy(), 'is_target': is_target})
+                label_widget.after(0, lambda: label_widget.config(text=f"路徑: {path}"))
         except Exception as e:
-            label_widget.config(text=f"無法載入: {os.path.basename(path)}")
+            label_widget.after(0, lambda: label_widget.config(text=f"無法載入: {os.path.basename(path)}"))
             log_error(f"載入圖片預覽失敗 '{path}': {e}", True)
             self.preview_queue.put({'type': 'image_loaded', 'image': None, 'is_target': is_target})
-
-    def _draw_qr_outline(self, image: Image.Image, qr_points_list: list) -> Image.Image:
-        # This function is not used in the provided code, but kept for completeness
-        pass
 
     def _update_all_previews(self) -> None:
         self._resize_and_display(self.target_image_label, self.pil_img_target, True)
@@ -1816,14 +1869,16 @@ class MainWindow(tk.Tk):
 
     def _on_preview_resize(self, event: tk.Event) -> None:
         try:
-            is_target = (event.widget == self.target_image_label)
+            is_target = (event.widget.master == self.target_image_frame)
             self._resize_and_display(event.widget, self.pil_img_target if is_target else self.pil_img_compare, is_target)
         except Exception as e:
             log_error(f"調整預覽面板大小時發生錯誤: {e}", True)
 
     def _resize_and_display(self, label: tk.Label, pil_image: Image.Image | None, is_target: bool) -> None:
+        img_tk_ref = self.img_tk_target if is_target else self.img_tk_compare
         if not pil_image:
             label.config(image="")
+            img_tk_ref = None
             return
         
         w, h = label.winfo_width(), label.winfo_height()
@@ -1874,30 +1929,76 @@ class MainWindow(tk.Tk):
         tags = self.tree.item(item_id, "tags")
         if 'protected_item' in tags: return
         
-        path = self.tree.item(item_id, "values")[2]
+        path = self.item_to_path.get(item_id)
+        if not path: return
+
         if path in self.selected_files:
             self.selected_files.discard(path)
+            self.tree.set(item_id, "status", "☐")
         else:
             self.selected_files.add(path)
+            self.tree.set(item_id, "status", "☑")
         
-        self._refresh_item_display(item_id)
+        parent_id = self.child_to_parent.get(item_id)
+        if parent_id:
+            self._update_group_checkbox(parent_id)
         
-    def _refresh_item_display(self, item_id: str):
-        if not self.tree.exists(item_id): return
-        tags = self.tree.item(item_id, "tags")
-        
-        if 'parent_item' in tags:
-            return # 父項目沒有勾選框，無需刷新
+    def _toggle_group_selection(self, parent_id: str):
+        children = self.parent_to_children.get(parent_id, [])
+        if not children: return
 
-        path = self.tree.item(item_id, "values")[2]
-        is_selected = path in self.selected_files
+        selectable_children = [
+            child_id for child_id in children 
+            if 'protected_item' not in self.tree.item(child_id, "tags")
+        ]
         
-        if 'protected_item' in tags: 
-            self.tree.set(item_id, "status", "🔒")
-        else:
-            self.tree.set(item_id, "status", "☑" if is_selected else "☐")
+        # Determine if all selectable children are currently selected
+        all_selected = all(self.item_to_path.get(child_id) in self.selected_files for child_id in selectable_children)
+
+        # If all are selected, deselect all. Otherwise, select all.
+        for child_id in selectable_children:
+            path = self.item_to_path.get(child_id)
+            if all_selected:
+                self.selected_files.discard(path)
+            else:
+                self.selected_files.add(path)
         
-    def _toggle_selection(self, event: tk.Event | None = None) -> str:
+        self._update_group_checkbox(parent_id)
+
+    def _update_group_checkbox(self, parent_id: str):
+        if not self.tree.exists(parent_id): return
+        
+        children = self.parent_to_children.get(parent_id, [])
+        selectable_children = [
+            child_id for child_id in children 
+            if 'protected_item' not in self.tree.item(child_id, "tags")
+        ]
+        if not selectable_children: 
+            self.tree.set(parent_id, "status", "") # No selectable children, no checkbox
+            return
+
+        selected_count = sum(1 for child_id in selectable_children if self.item_to_path.get(child_id) in self.selected_files)
+
+        # Update children checkboxes first
+        for child_id in selectable_children:
+            path = self.item_to_path.get(child_id)
+            self.tree.set(child_id, "status", "☑" if path in self.selected_files else "☐")
+
+        # Update parent aggregate checkbox
+        current_tags = list(self.tree.item(parent_id, "tags"))
+        current_tags.remove('parent_partial_selection') if 'parent_partial_selection' in current_tags else None
+        
+        if selected_count == 0:
+            self.tree.set(parent_id, "status", "☐")
+        elif selected_count == len(selectable_children):
+            self.tree.set(parent_id, "status", "☑")
+        else: # Partial selection
+            self.tree.set(parent_id, "status", "◪")
+            current_tags.append('parent_partial_selection')
+        
+        self.tree.item(parent_id, tags=tuple(current_tags))
+
+    def _toggle_selection_with_space(self, event: tk.Event) -> str:
         selected_ids = self.tree.selection()
         if not selected_ids: return "break"
         
@@ -1905,8 +2006,7 @@ class MainWindow(tk.Tk):
         tags = self.tree.item(item_id, "tags")
         
         if 'parent_item' in tags:
-            if event.keysym == 'Return':
-                self.tree.toggle(item_id)
+            self._toggle_group_selection(item_id)
         else: 
             self._toggle_selection_by_item_id(item_id)
             
@@ -1914,22 +2014,21 @@ class MainWindow(tk.Tk):
 
     def _get_all_selectable_paths(self):
         paths = set()
-        for parent_id in self.tree.get_children(""):
-            if 'parent_item' in self.tree.item(parent_id, "tags"):
-                for child_id in self.tree.get_children(parent_id):
-                    if 'protected_item' not in self.tree.item(child_id, "tags"):
-                        paths.add(self.tree.item(child_id, "values")[2])
-            elif 'qr_item' in self.tree.item(parent_id, "tags"):
-                 paths.add(self.tree.item(parent_id, "values")[2])
+        for item_id in self.item_to_path:
+            tags = self.tree.item(item_id, "tags")
+            if 'protected_item' not in tags:
+                paths.add(self.item_to_path[item_id])
         return paths
 
     def _refresh_all_checkboxes(self):
-        for parent_id in self.tree.get_children(""):
-            if 'parent_item' in self.tree.item(parent_id, "tags"):
-                for child_id in self.tree.get_children(parent_id):
-                    self._refresh_item_display(child_id)
-            else:
-                self._refresh_item_display(parent_id)
+        # Update standalone items (like QR)
+        for item_id in self.tree.get_children(""):
+             if 'qr_item' in self.tree.item(item_id, "tags"):
+                 path = self.item_to_path.get(item_id)
+                 self.tree.set(item_id, "status", "☑" if path in self.selected_files else "☐")
+        # Update groups
+        for parent_id in self.parent_to_children:
+            self._update_group_checkbox(parent_id)
 
     def _select_all(self) -> None:
         self.selected_files.update(self._get_all_selectable_paths())
@@ -1937,15 +2036,18 @@ class MainWindow(tk.Tk):
 
     def _select_suggested_for_deletion(self) -> None:
         paths_to_select = set()
-        for parent_id in self.tree.get_children(""):
-            if 'parent_item' in self.tree.item(parent_id, "tags"):
-                children = self.tree.get_children(parent_id)
-                if children:
-                    for child_id in children[1:]:
-                        if 'protected_item' not in self.tree.item(child_id, "tags"):
-                            paths_to_select.add(self.tree.item(child_id, "values")[2])
-            elif 'qr_item' in self.tree.item(parent_id, "tags"):
-                paths_to_select.add(self.tree.item(parent_id, "values")[2])
+        # Handle groups
+        for parent_id, children in self.parent_to_children.items():
+            # Skip the first child (the base image)
+            for child_id in children[1:]:
+                if 'protected_item' not in self.tree.item(child_id, "tags"):
+                    paths_to_select.add(self.item_to_path.get(child_id))
+        
+        # Handle standalone QR items
+        for item_id in self.tree.get_children(""):
+            if 'qr_item' in self.tree.item(item_id, "tags"):
+                paths_to_select.add(self.item_to_path.get(item_id))
+                
         self.selected_files.update(paths_to_select)
         self._refresh_all_checkboxes()
         
@@ -1962,7 +2064,7 @@ class MainWindow(tk.Tk):
         paths_to_select = set()
         for item_id in self.tree.get_children(""):
             if 'qr_item' in self.tree.item(item_id, "tags"):
-                path = self.tree.item(item_id, "values")[2]
+                path = self.item_to_path.get(item_id)
                 paths_to_select.add(path)
         
         if not paths_to_select:
@@ -2093,8 +2195,9 @@ class MainWindow(tk.Tk):
     def _open_selected_folder_single(self) -> None:
         selected = self.tree.selection()
         if selected:
-            path_tag = self.tree.item(selected[0], "values")[2]
-            if os.path.isfile(path_tag): self._open_folder(os.path.dirname(path_tag))
+            path = self.item_to_path.get(selected[0])
+            if path and os.path.isfile(path): 
+                self._open_folder(os.path.dirname(path))
 
     def _create_context_menu(self) -> None:
         self.context_menu = tk.Menu(self, tearoff=0)
@@ -2113,14 +2216,18 @@ class MainWindow(tk.Tk):
         selected = self.tree.selection()
         if not selected: return
         item_id = selected[0]
-        parent_id = self.tree.parent(item_id) or item_id
+        parent_id = self.child_to_parent.get(item_id) or item_id
         
-        group_key_basename = self.tree.item(parent_id, "values")[1] 
-        original_group_key = next((gk for gk, _ in self.sorted_groups if os.path.basename(gk) == group_key_basename), None)
+        if 'parent_item' in self.tree.item(parent_id, "tags"):
+            # Find the original group_key path from the first child
+            first_child = self.parent_to_children[parent_id][0]
+            base_path = self.item_to_path[first_child]
+            
+            original_group_key = next((gk for gk, _ in self.sorted_groups if gk == base_path), None)
 
-        if original_group_key: 
-            self.banned_groups.add(original_group_key); 
-            self._process_scan_results([])
+            if original_group_key: 
+                self.banned_groups.add(original_group_key)
+                self._process_scan_results([])
 
     def _unban_all_groups(self) -> None: self.banned_groups.clear(); self._process_scan_results([])
 
@@ -2176,4 +2283,4 @@ if __name__ == '__main__':
     from multiprocessing import freeze_support
     freeze_support()
     main()
-#版本13.3.0完结
+#版本14.0.0完結
