@@ -1283,63 +1283,91 @@ class ImageComparisonEngine:
             log_info("退回純 QR 掃描，因廣告資料夾無效。")
             return self._detect_qr_codes_pure(files_to_process, scan_cache_manager)
         
-        # [核心修正] 在此處對掃描到的廣告路徑進行正規化
+        # === 步骤 1: 独立加载广告数据 (pHash + QR) ===
         ad_paths = [os.path.normpath(os.path.join(r, f)) for r, _, fs in os.walk(ad_folder_path) for f in fs if f.lower().endswith(('.png','.jpg','.jpeg','.webp'))]
         ad_cache_manager = ScannedImageCacheManager(ad_folder_path)
         
-        # 廣告圖片需要 pHash 和 qr_points
+        self.file_data.clear()
         if not self._process_images_with_cache(ad_paths, ad_cache_manager, "廣告圖片屬性", _pool_worker_process_image_full, 'qr_points'):
             return None
-        ad_file_data = self.file_data.copy()
+        ad_data = self.file_data.copy()
 
-        ad_hashes = {path: data['phash'] for path, data in ad_file_data.items() if data and data.get('phash')}
-        if not ad_hashes:
+        # 检查广告库有效性
+        ad_with_phash = {path: data for path, data in ad_data.items() if data and data.get('phash')}
+        if not ad_with_phash:
             log_info("廣告資料夾無有效哈希，退回純 QR 掃描模式。")
             return self._detect_qr_codes_pure(files_to_process, scan_cache_manager)
-        self._update_progress(text=f"🧠 廣告快取載入完成 ({len(ad_hashes)} 筆)")
+        self._update_progress(text=f"🧠 廣告庫資料載入完成 ({len(ad_with_phash)} 筆)")
 
-        # 目標圖片只需要 pHash
+        # === 步骤 2: 独立加载漫画图库数据 (只需 pHash) ===
         self.file_data.clear()
         if not self._process_images_with_cache(files_to_process, scan_cache_manager, "目標雜湊", _pool_worker_process_image_phash_only, 'phash'):
             return None
-        target_file_data = self.file_data.copy()
+        gallery_data = self.file_data.copy()
 
-        found_items, remaining_files_for_qr = [], []
-        max_diff = hamming_from_sim(PHASH_STRICT_SKIP)
+        # === 步骤 3: 使用 LSH 双哈希进行广告匹配 ===
+        self._update_progress(text="🔍 正在使用 LSH 快速匹配廣告...")
+        phash_index = self._build_phash_band_index(gallery_data)
         
-        for path, data in target_file_data.items():
+        found_ad_matches = []
+        user_thresh = self.config.get('similarity_threshold', 95.0) / 100.0
+
+        for ad_path, ad_ent in ad_with_phash.items():
             if self._check_control() != 'continue': return None
-            target_hash = data.get('phash')
-            if not target_hash:
-                remaining_files_for_qr.append(path); continue
             
-            match_found = False
-            for ad_path, ad_hash in ad_hashes.items():
-                if ad_hash and target_hash - ad_hash <= max_diff:
-                    ad_has_qr = ad_file_data.get(ad_path, {}).get('qr_points')
-                    if ad_has_qr:
-                        found_items.append((ad_path, path, "廣告匹配(快速)"))
-                        target_file_data.setdefault(path, {})['qr_points'] = ad_file_data[ad_path]['qr_points']
-                        match_found = True
-                        break 
-            if not match_found:
-                remaining_files_for_qr.append(path)
+            ad_p_hash = ad_ent.get('phash')
+            if not ad_p_hash: continue
+            
+            candidate_paths = self._lsh_candidates_for(ad_path, ad_p_hash, phash_index)
+
+            for g_path in candidate_paths:
+                g_ent = gallery_data.get(g_path)
+                if not g_ent or not g_ent.get('phash'): continue
+                g_p_hash = g_ent['phash']
+
+                d_p = ad_p_hash - g_p_hash
+                sim_p = sim_from_hamming(d_p)
+
+                if sim_p < PHASH_FAST_THRESH: continue
+                
+                is_accepted, final_sim_val = True, sim_p
+                if sim_p < PHASH_STRICT_SKIP:
+                    ad_w_hash = self._get_or_compute_whash(ad_path, ad_cache_manager)
+                    g_w_hash = self._get_or_compute_whash(g_path, scan_cache_manager)
+                    is_accepted, final_sim_val = self._accept_pair_with_dual_hash(ad_p_hash, g_p_hash, ad_w_hash, g_w_hash)
+
+                if is_accepted and final_sim_val >= user_thresh:
+                    # 只有真正有 QR Code 的广告匹配才算数
+                    if ad_ent.get('qr_points'):
+                        found_ad_matches.append((ad_path, g_path, "廣告匹配(快速)"))
+                        gallery_data.setdefault(g_path, {})['qr_points'] = ad_ent['qr_points']
+                        
+        # === 步骤 4: 对未匹配的图片进行纯粹 QR 扫描 ===
+        matched_gallery_paths = {pair[1] for pair in found_ad_matches}
+        remaining_files_for_qr = [path for path in gallery_data if path not in matched_gallery_paths]
         
-        ad_match_count = len(found_items)
-        self._update_progress(text=f"快速匹配完成，找到 {ad_match_count} 個廣告。對 {len(remaining_files_for_qr)} 個檔案進行 QR 掃描...")
+        self._update_progress(text=f"快速匹配完成，找到 {len(found_ad_matches)} 個廣告。對 {len(remaining_files_for_qr)} 個檔案進行 QR 掃描...")
         
         if remaining_files_for_qr:
             if self._check_control() != 'continue': return None
-            self.file_data = {p: d for p, d in target_file_data.items() if p in remaining_files_for_qr}
+            
+            # 清理 file_data，只保留需要扫描 QR 的部分
+            self.file_data = {p: d for p, d in gallery_data.items() if p in remaining_files_for_qr}
             qr_result_tuple = self._detect_qr_codes_pure(remaining_files_for_qr, scan_cache_manager)
+            
             if qr_result_tuple is None: return None
             
             qr_results, qr_data = qr_result_tuple
-            found_items.extend(qr_results)
-            target_file_data.update(qr_data)
+            found_ad_matches.extend(qr_results)
+            gallery_data.update(qr_data)
 
-        self.file_data = {**ad_file_data, **target_file_data}
-        return found_items, self.file_data
+        # === 步骤 5: 合并所有数据并返回 ===
+        self.file_data = {**ad_data, **gallery_data}
+        scan_cache_manager.save_cache()
+        ad_cache_manager.save_cache()
+        
+        return found_ad_matches, self.file_data
+
 ##12
 #接續14.0.0第二部分
 
