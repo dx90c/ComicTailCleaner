@@ -158,8 +158,19 @@ def log_performance(message: str):
         memory_mb = process.memory_info().rss / (1024 * 1024)
         performance_info = f" (CPU: {cpu_percent:.1f}%, Mem: {memory_mb:.1f} MB)"
     log_info(f"{message}{performance_info}")
-
+######
 def check_and_install_packages():
+    # [核心修正] 确保 global 声明在函式的最顶部
+    global QR_SCAN_ENABLED, PERFORMANCE_LOGGING_ENABLED
+
+    # 如果在打包后的EXE环境中运行，则完全跳过依赖检查
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        print("在打包环境中运行，跳过依赖检查。")
+        # 在EXE中，我们假设所有可选依赖都已打包
+        QR_SCAN_ENABLED = True 
+        PERFORMANCE_LOGGING_ENABLED = True
+        return
+
     print("正在檢查必要的 Python 套件...", flush=True)
     
     required = {'Pillow': 'Pillow>=9.0.0', 'imagehash': 'imagehash>=4.2.1', 'send2trash': 'send2trash>=1.8.0'}
@@ -205,13 +216,13 @@ def check_and_install_packages():
                 messagebox.showinfo("安裝成功", "核心套件安裝成功，請重新啟動程式。")
                 sys.exit(0)
             except subprocess.CalledProcessError as e:
-                messagebox.showerror("安裝失敗", f"自動安裝套件失敗：{e}\n請手動打開命令提示字元並執行 'pip install {package_str}'")
+                messagebox.showerror("安裝失敗", f"自動安裝套-件失敗：{e}\n請手動打開命令提示字元並執行 'pip install {package_str}'")
                 sys.exit(1)
         else:
             messagebox.showerror("缺少核心依賴", f"請手動安裝必要套件：{', '.join(missing_core)}。\n命令：pip install {package_str}")
             sys.exit(1)
             
-    global QR_SCAN_ENABLED, PERFORMANCE_LOGGING_ENABLED
+    # 現在可以安全地赋值
     QR_SCAN_ENABLED = 'opencv-python' not in missing_optional and 'numpy' not in missing_optional
     PERFORMANCE_LOGGING_ENABLED = 'psutil' not in missing_optional
 
@@ -226,7 +237,7 @@ def check_and_install_packages():
         print(f"警告: 缺少 {', '.join(missing_optional)}，相關功能已禁用。", flush=True)
 
     print("所有必要套件檢查通過。", flush=True)
-
+######
 def _pool_worker_process_image(image_path: str) -> tuple[str, dict | None]:
     if not os.path.exists(image_path):
         return (image_path, {'error': f"圖片檔案不存在: {image_path}"})
@@ -2616,4 +2627,4 @@ if __name__ == '__main__':
     from multiprocessing import freeze_support
     freeze_support()
     main()
-#版本14.0.0完結
+#版本14.2.1完結
