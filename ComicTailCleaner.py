@@ -158,7 +158,7 @@ def log_performance(message: str):
         memory_mb = process.memory_info().rss / (1024 * 1024)
         performance_info = f" (CPU: {cpu_percent:.1f}%, Mem: {memory_mb:.1f} MB)"
     log_info(f"{message}{performance_info}")
-######
+###
 def check_and_install_packages():
     # [核心修正] 确保 global 声明在函式的最顶部
     global QR_SCAN_ENABLED, PERFORMANCE_LOGGING_ENABLED
@@ -237,7 +237,7 @@ def check_and_install_packages():
         print(f"警告: 缺少 {', '.join(missing_optional)}，相關功能已禁用。", flush=True)
 
     print("所有必要套件檢查通過。", flush=True)
-######
+###
 def _pool_worker_process_image(image_path: str) -> tuple[str, dict | None]:
     if not os.path.exists(image_path):
         return (image_path, {'error': f"圖片檔案不存在: {image_path}"})
@@ -288,6 +288,43 @@ def _pool_worker_detect_qr_code(image_path: str, resize_size: int) -> tuple[str,
     except Exception as e:
         return (image_path, {'error': f"QR檢測失敗 {image_path}: {e}"})
 ##12
+def _pool_worker_process_image_full(image_path: str, resize_size: int) -> tuple[str, dict | None]:
+    if not os.path.exists(image_path):
+        return (image_path, {'error': f"圖片檔案不存在: {image_path}"})
+    try:
+        with Image.open(image_path) as img:
+            if not img or img.width == 0 or img.height == 0:
+                return (image_path, {'error': f"圖片尺寸異常或無法讀取: {image_path}"})
+            
+            img = ImageOps.exif_transpose(img)
+            
+            # 計算 pHash
+            phash_val = imagehash.phash(img, hash_size=8)
+            
+            # 檢測 QR Code
+            resized_img = img.copy()
+            resized_img.thumbnail((resize_size, resize_size), Image.Resampling.LANCZOS)
+            qr_points_val = _detect_qr_on_image(resized_img)
+            if not qr_points_val:
+                qr_points_val = _detect_qr_on_image(img)
+                
+        # 獲取檔案資訊
+        stat_info = os.stat(image_path)
+        
+        return (image_path, {
+            'phash': phash_val, 
+            'qr_points': qr_points_val,
+            'size': stat_info.st_size, 
+            'ctime': stat_info.st_ctime, 
+            'mtime': stat_info.st_mtime
+        })
+    except UnidentifiedImageError:
+        return (image_path, {'error': f"無法識別圖片格式: {image_path}"})
+    except (cv2.error, ValueError) as e:
+        return (image_path, {'error': f"OpenCV 處理失敗 {image_path}: {e}"})
+    except Exception as e:
+        return (image_path, {'error': f"完整圖片處理失敗 {image_path}: {e}"})
+
 # 替換原有的 _pool_worker_process_image
 def _pool_worker_process_image_phash_only(image_path: str):
     if not os.path.exists(image_path):
