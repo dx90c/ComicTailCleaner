@@ -62,3 +62,62 @@ pyinstaller --noconfirm --clean --windowed --onefile --add-data "config.json;." 
 3.  **執行標準化命名**: 將 `ComicTailCleaner_v14.2.1.py` 複製為 `ComicTailCleaner.py`。
 4.  **複製並執行命令**: 選擇您需要的模式，複製其對應的完整命令，並在終端機中貼上執行。
 5.  **獲取成品**: 打包成功後，在專案根目錄下會出現一個 `dist` 資料夾。您需要的 EXE 檔案（或資料夾）就在其中。
+
+小打包
+
+pyinstaller --noconfirm --clean --windowed --onefile --upx-dir="." --add-data "config.json;." --hidden-import=psutil --hidden-import=imagehash --hidden-import=send2trash --hidden-import=cv2 --hidden-import=numpy --hidden-import=scipy --hidden-import=pywt --collect-all=imagehash --collect-all=pywt --exclude-module=PyQt5 --exclude-module=PySide2 --exclude-module=wx --exclude-module=matplotlib --exclude-module=pandas --exclude-module=torch --exclude-module=tensorflow --exclude-module=scipy.stats --exclude-module=scipy.optimize --exclude-module=scipy.interpolate "ComicTailCleaner_v14.2.1.py"
+
+
+
+
+---
+
+### **v14.3.0 单档案打包指令**
+
+**核心思想**：我们继承所有 v14.2.1 的优化指令，并再次确认所有必要的函式库都已被正确包含。
+
+**最终建议指令：**
+
+```bash
+pyinstaller --noconfirm --clean --windowed --onefile --upx-dir="." ^
+ --add-data "config.json;." ^
+ --hidden-import="psutil" ^
+ --hidden-import="imagehash" ^
+ --hidden-import="send2trash" ^
+ --hidden-import="cv2" ^
+ --hidden-import="numpy" ^
+ --hidden-import="scipy" ^
+ --hidden-import="PyWavelets" ^
+ --collect-all="imagehash" ^
+ --collect-all="pywt" ^
+ --exclude-module="PyQt5" ^
+ --exclude-module="PySide2" ^
+ --exclude-module="wx" ^
+ --exclude-module="matplotlib" ^
+ --exclude-module="pandas" ^
+ --exclude-module="torch" ^
+ --exclude-module="tensorflow" ^
+ "ComicTailCleaner_v14.3.0.py"
+```
+*(注：我使用了 `^` 符号 (在 Windows 命令提示字元中) 来将长指令换行，这样更具可读性。您也可以直接复制成一行来执行。)*
+
+---
+
+### **指令解读与微调说明**
+
+1.  **`--onefile`**: 生成单一的 `.exe` 档案，这是我们的核心目标。
+2.  **`--windowed`**: 这是一个 GUI 应用程式，执行时不要显示黑色的命令提示字元视窗。
+3.  **`--clean`**: 在打包前清理旧的建构快取。
+4.  **`--upx-dir="."`**: 使用 UPX 压缩工具来减小最终 `.exe` 的体积。请确保您已经下载了 [UPX](https://github.com/upx/upx/releases) 并将其 `upx.exe` 档案放在与您的 `.py` 档案相同的目录下。
+5.  **`--add-data "config.json;."`**: 将 `config.json` 档案包含进来，并放在最终执行档的根目录下。这是正确的。
+6.  **`--hidden-import="..."`**: 这些是 `PyInstaller` 静态分析时可能找不到的“隐藏导入”。
+    *   `psutil`, `imagehash`, `send2trash`, `cv2`, `numpy`, `scipy`：这些都是我们程式码中明确或间接使用到的函式库，继续包含它们是正确的。
+    *   `--hidden-import="PyWavelets"`: 这是一个**关键的新增/确认**。`imagehash` 的 `wHash` 演算法依赖于 `PyWavelets` 函式库（通常简写为 `pywt`）。虽然 `PyInstaller` 的 `collect-all` 应该能找到它，但明确地将其作为隐藏导入可以增加打包的成功率。
+7.  **`--collect-all="..."`**: 强制收集一个函式库的所有相关档案。
+    *   `imagehash`, `pywt`：继续保留这两项是确保杂凑演算法正常工作的最佳实践。
+8.  **`--exclude-module="..."`**: 明确排除我们**没有**使用到的大型 GUI 或科学计算函式库。这是减小最终档案体积的**最有效手段**。您提供的排除列表非常棒，我们完全继承。
+    *   （补充说明）我们已经排除了 `scipy` 的大部分子模组，但因为 `imagehash` 的某些演算法可能会间接触发对 `scipy` 的依赖，所以我们依然在 `--hidden-import` 中保留了 `scipy` 的主模组，这是一个稳妥的做法。
+9.  **`"ComicTailCleaner_v14.3.0.py"`**: 确保最后指定的是您**最新版本**的 Python 档案名称。
+
+
+pyinstaller --noconfirm --clean --windowed --onefile --upx-dir="." --add-data "config.json;." --hidden-import="psutil" --hidden-import="imagehash" --hidden-import="send2trash" --hidden-import="cv2" --hidden-import="numpy" --hidden-import="scipy" --hidden-import="PyWavelets" --collect-all="imagehash" --collect-all="pywt" --exclude-module="PyQt5" --exclude-module="PySide2" --exclude-module="wx" --exclude-module="matplotlib" --exclude-module="pandas" --exclude-module="torch" --exclude-module="tensorflow" "ComicTailCleaner14.3.0.py"
