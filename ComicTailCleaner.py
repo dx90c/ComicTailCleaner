@@ -18,7 +18,7 @@
 #   - [強化] 引入“半冷啟動保底”機制，確保即使是未變更的舊資料夾，若在圖片快取中無紀錄，也會被自動納入掃描，杜絕資料遺漏。
 #
 # - 【快取系統全面加固】重構了快取管理機制，杜絕一切因路徑格式引發的問題：
-#   - [修正] 所有存入快取的路徑 KEY 強制統一為「正規化」+「小寫」，從根本上解決了因大小寫或斜槓 (`/` vs `\`) 不同導致的 `KeyError` 和幽靈資料夾誤判。
+#   - [修正] 所有存入快取的路徑 KEY 強制統一為「正規化」+「小寫」，從根本上解決了因大小寫或斜杠 (`/` vs `\`) 不同導致的 `KeyError` 和幽靈資料夾誤判。
 #   - [強化] 快取系統現具備“自我修復”能力，能自動偵測並清理因外部檔案操作產生的“幽靈路徑”和“幽靈資料夾”，無需使用者手動清空。
 #   - [修正] 修復了在特定模式下，“清理快取”按鈕無法刪除正確快取檔案的 Bug。
 #
@@ -30,13 +30,10 @@
 # - 【廣告比對性能躍升】使用高效 LSH 取代 O(n²) 的暴力演算法來進行廣告庫內部分組：
 #   - [修正] 根除了在處理大型廣告庫時，會導致程式長時間“卡死”的致命性能瓶頸，速度提升數百倍。
 #
-# - 【顏色過濾閘修正】
-#   - [修正] 徹底修復了會將純黑與純白圖片錯誤匹配的“黑白漏洞”，提升了比對精度。
-#   - [強化] `_avg_hsv` 函式改用 `colorsys` 標準庫，確保顏色特徵計算的準確性與標準化。
-#
-# - 【核心比對邏輯修正】
-#   - [修正] 確保比對嚴格遵循「LSH -> pHash -> 顏色 -> wHash」的“三級漏斗”順序，提升效率與精度。
-#   - [修正] 修正了在不同比對模式下，讀取 pHash 值時來源資料字典混亂的 Bug。
+# - 【顏色過濾閘升級與動態化】
+#   - [修正] 徹底修復了會將純黑與純白、純白與淺灰圖片錯誤匹配的“黑白漏洞”，大幅提升了比對精度。
+#   - [新增] 引入“無彩度亮度 (`achroma`)”作為第二重灰階判斷指標，能更精準地區分不同亮度的灰度/白底圖片。
+#   - [【核心設計】] 實現了“單一拉杆控制系統”，現在 UI 上的“相似度閥值”拉杆將動態地、智慧地調整內部顏色過濾閘的所有容忍度參數。使用者只需調整一個拉杆，即可在“超嚴格(100%)”與“較寬鬆(80%)”之間平滑切換，無需理解複雜的內部參數。
 #
 # - 【使用者體驗 (UX) 優化】
 #   - [調整] 「選取建議」按鈕的邏輯，從“選取所有副本”調整為更安全的“僅選取 100.0% 相似的副本”。
@@ -142,28 +139,39 @@ def _avg_hsv(img: Image.Image) -> tuple[float,float,float]:
     # 返回平均值，H色相乘以360度
     return float(np.mean(h)*360.0), float(np.mean(s)), float(np.mean(v))
 ##
-def _color_gate(hsv1, hsv2,
-                hue_deg_tol: float = 25.0, sat_tol: float = 0.25,
-                low_sat_thresh: float = 0.12, low_sat_value_tol: float = 0.3) -> bool:
-    """【v14.3.0 修正+強化】顏色過濾閘，增加亮度檢查，並進行入口型別安全檢查。"""
-    # 【AI 建議修正 (B)】入口做一次保底型別與 NaN 清理
+def _color_gate(
+    hsv1: tuple[float, float, float],
+    hsv2: tuple[float, float, float],
+    *,
+    hue_deg_tol: float,
+    sat_tol: float,
+    low_sat_thresh: float,
+    low_sat_value_tol: float,
+    low_sat_achroma_tol: float
+) -> bool:
+    """
+    【v14.3.0 最终版】顏色過濾閘：参数由外部动态传入。
+    - 低飽和度時（灰階/白底），同時檢查亮度差與「無彩度亮度指標」差。
+    - 彩色圖仍按色相與飽和度門檻。
+    """
     try:
         h1, s1, v1 = (float(hsv1[0]), float(hsv1[1]), float(hsv1[2]))
         h2, s2, v2 = (float(hsv2[0]), float(hsv2[1]), float(hsv2[2]))
     except (TypeError, IndexError, ValueError):
-        return False # 如果傳入的資料不是合法的 list/tuple，直接拒絕
+        return False
 
-    # 後續邏輯維持不變
     if max(s1, s2) < low_sat_thresh:
-        return abs(v1 - v2) < low_sat_value_tol
-        
-    dh = abs(h1 - h2); hue_diff = min(dh, 360.0 - dh)
-    if hue_diff > hue_deg_tol:
-        return False
-        
-    if abs(s1 - s2) > sat_tol:
-        return False
-        
+        if abs(v1 - v2) > low_sat_value_tol: return False
+        a1 = v1 * (1.0 - s1)
+        a2 = v2 * (1.0 - s2)
+        if abs(a1 - a2) > low_sat_achroma_tol: return False
+        if abs(s1 - s2) > 0.08: return False
+        return True
+
+    dh = abs(h1 - h2)
+    hue_diff = min(dh, 360.0 - dh)
+    if hue_diff > hue_deg_tol: return False
+    if abs(s1 - s2) > sat_tol: return False
     return True
 ##
 # === 5. 工具函數 (Helper Functions) ===
@@ -1095,6 +1103,24 @@ class ImageComparisonEngine:
 
     def _find_similar_images(self, target_files: list[str], scan_cache_manager: ScannedImageCacheManager) -> tuple[list, dict] | None:
         continue_processing, gallery_data = self._process_images_with_cache(target_files, scan_cache_manager, "目標雜湊", _pool_worker_process_image_phash_only, 'phash')
+        # === 【v14.3.0 最终特调版】单一滑杆控制所有参数 ===
+        user_thresh_percent = self.config.get('similarity_threshold', 95.0)
+
+        def lerp_strict_loose(user_percent: float, strict_val: float, loose_val: float) -> float:
+            p = max(80.0, min(100.0, float(user_percent)))
+            t = (100.0 - p) / 20.0
+            return strict_val + t * (loose_val - strict_val)
+
+        color_gate_params = {
+            'hue_deg_tol':         lerp_strict_loose(user_thresh_percent, 18.0, 25.0),
+            'sat_tol':             lerp_strict_loose(user_thresh_percent, 0.18, 0.25),
+            'low_sat_value_tol':   lerp_strict_loose(user_thresh_percent, 0.10, 0.15),
+            'low_sat_achroma_tol': lerp_strict_loose(user_thresh_percent, 0.12, 0.18),
+            'low_sat_thresh':      0.18
+        }
+        log_info(f"[动态参数] 根据 UI 阀值 {user_thresh_percent:.1f}%，颜色闸门参数已动态设定。")
+        # === 动态参数设定结束 ===
+        
         if not continue_processing: return None
 
         ad_data, ad_cache_manager, leader_to_ad_group = {}, None, {}
@@ -1189,7 +1215,7 @@ class ImageComparisonEngine:
                     if not self._ensure_features(ad_member_path, current_ad_cache, need_hsv=True) or \
                        not self._ensure_features(p2_path, scan_cache_manager, need_hsv=True): continue
                     hsv1, hsv2 = self.file_data[ad_member_path]['avg_hsv'], self.file_data[p2_path]['avg_hsv']
-                    if not _color_gate(tuple(hsv1), tuple(hsv2)): continue
+                    if not _color_gate(hsv1, hsv2, **color_gate_params):continue
                     stats['passed_color'] += 1
 
                     is_accepted, final_sim_val = True, sim_p
