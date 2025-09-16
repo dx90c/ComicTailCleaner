@@ -121,3 +121,8 @@ pyinstaller --noconfirm --clean --windowed --onefile --upx-dir="." ^
 
 
 pyinstaller --noconfirm --clean --windowed --onefile --upx-dir="." --add-data "config.json;." --hidden-import="psutil" --hidden-import="imagehash" --hidden-import="send2trash" --hidden-import="cv2" --hidden-import="numpy" --hidden-import="scipy" --hidden-import="PyWavelets" --collect-all="imagehash" --collect-all="pywt" --exclude-module="PyQt5" --exclude-module="PySide2" --exclude-module="wx" --exclude-module="matplotlib" --exclude-module="pandas" --exclude-module="torch" --exclude-module="tensorflow" "ComicTailCleaner14.3.0.py"
+
+
+ComicTailCleaner14.4.0 打包紀錄
+
+pyinstaller --noconfirm --clean --windowed --onefile --upx-dir="." --add-binary="UnRAR.exe;." --hidden-import="pkg_resources.py2_warn" --hidden-import="psutil" --hidden-import="send2trash" --hidden-import="imagehash" --hidden-import="cv2" --hidden-import="numpy" --hidden-import="scipy" --hidden-import="PyWavelets" --hidden-import="rarfile" --collect-all="imagehash" --collect-all="pywt" --exclude-module="PyQt5" --exclude-module="PySide2" --exclude-module="wx" --exclude-module="matplotlib" --exclude-module="pandas" --exclude-module="torch" --exclude-module="tensorflow" "app.py"
