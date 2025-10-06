@@ -1,11 +1,11 @@
 # ======================================================================
 # 檔案名稱：config.py
 # 模組目的：存放 ComicTailCleaner 的全域常數與預設設定
-# 版本：1.0.0
+# 版本：1.1.0 (更新至 v14.5.0 並新增 QR 模式專屬設定)
 # ======================================================================
 
 # === 應用程式基本資訊 ===
-APP_VERSION = "14.4.0"
+APP_VERSION = "15.0.0"
 APP_NAME_EN = "ComicTailCleaner"
 APP_NAME_TC = "漫畫尾頁廣告清理"
 CONFIG_FILE = "config.json"  # 用於保存使用者設定的檔案名稱
@@ -23,31 +23,34 @@ default_config = {
     # --- 路徑設定 ---
     'root_scan_folder': '',          # 漫畫掃描的根目錄
     'ad_folder_path': '',            # 廣告圖片庫的目錄
-    'enable_archive_scan': False,    # 是否啟用壓縮檔 (zip, cbz, rar, cbr) 掃描功能
+    'enable_archive_scan': True,     # 是否啟用壓縮檔 (zip, cbz, rar, cbr) 掃描功能
 
     # --- 掃描與提取設定 ---
-    'extract_count': 8,              # 從每個資料夾或壓縮檔末尾提取的圖片數量
+    'extract_count': 10,             # 從每個資料夾或壓縮檔末尾提取的圖片數量
     'enable_extract_count_limit': True, # 是否啟用上述的數量限制
     'excluded_folders': [],          # 掃描時要排除的資料夾名稱列表
 
     # --- 比對模式與閾值 ---
-    'comparison_mode': 'mutual_comparison', # 比對模式: 'mutual_comparison' (互相比對) 或 'ad_comparison' (廣告比對)
-    'similarity_threshold': 95,      # 圖片相似度的百分比門檻 (UI上的拉杆)
+    'comparison_mode': 'ad_comparison', # 預設模式: 'ad_comparison', 'mutual_comparison', 'qr_detection'
+    'similarity_threshold': 95,      # 圖片相似度的百分比門檻 (UI上的拉桿)
 
     # --- 時間篩選設定 ---
-    'enable_time_filter': False,     # 是否啟用基於資料夾建立時間的篩選
+    'enable_time_filter': False,     # 是否啟用基於檔案修改時間的篩選
     'start_date_filter': '',         # 篩選的開始日期 (格式: YYYY-MM-DD)
     'end_date_filter': '',           # 篩選的結束日期 (格式: YYYY-MM-DD)
 
     # --- QR Code 相關設定 ---
     'enable_qr_hybrid_mode': True,   # 在 QR 模式下，是否啟用與廣告庫的混合比對以加速
-    'qr_resize_size': 800,           # 進行 QR Code 檢測前，將圖片縮放到的尺寸 (像素)
+    'qr_resize_size': 1000,          # 進行 QR Code 檢測前，將圖片縮放到的尺寸 (像素)
+    'qr_pages_per_archive': 10,      # 【新增】在 QR 模式下，每個壓縮檔末尾提取的圖片數量
+    'qr_global_cap': 20000,          # 【新增】在 QR 模式下，全局最多處理的檔案總數上限
 
     # --- 性能與進階設定 ---
     'worker_processes': 0,           # 用於計算圖片雜湊的進程數 (0 代表自動設定)
     'ux_scan_start_delay': 0.1,      # 點擊開始後延遲多久開始計算，以確保UI能即時更新 (秒)
     'enable_inter_folder_only': True,# 在互相比對模式下，是否只比對來自不同資料夾的圖片
-    'enable_ad_cross_comparison': True, # 在互相比對模式下，是否啟用與廣告庫的交叉比對來標記相似群組
+    'enable_ad_cross_comparison': True, # 在互相比對模式下，是否啟用與廣告庫的交叉比對來標記相似羣組
+    'enable_color_filter': True, # 【新增】預設開啟
     'cross_comparison_include_bw': False, # 進行交叉比對時，是否也比對純黑/純白圖片
 
     # --- UI 顯示設定 ---
