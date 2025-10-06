@@ -1,7 +1,7 @@
 # ======================================================================
 # 檔案名稱：core_engine.py
 # 模組目的：包含核心的比對引擎、檔案掃描與快取管理邏輯
-# 版本：1.9.6 (最終穩定版：引入局部進度模式，並整合所有優化)
+# 版本：2.0.1 (最終穩定版：整合所有健壯性修正與性能優化)
 # ======================================================================
 
 import os
@@ -109,7 +109,7 @@ def _iter_scandir_recursively(root_path: str, excluded_paths: set, excluded_name
 # ======================================================================
 
 def _unified_scan_traversal(root_folder: str, excluded_paths: set, excluded_names: set, time_filter: dict, folder_cache: 'FolderStateCacheManager', progress_queue: Optional[Queue], control_events: Optional[dict]) -> tuple[dict, set, set]:
-    log_info("啟動 v1.9.6 統一掃描引擎...")
+    log_info("啟動 v2.0.1 統一掃描引擎...")
     live_folders, changed_or_new_folders = {}, set()
     queue = deque([root_folder])
     scanned_count = 0
@@ -162,7 +162,15 @@ def get_files_to_process(config_dict: Dict, image_cache_manager: ScannedImageCac
     if not os.path.isdir(root_folder): return [], {}
     
     enable_archive_scan = config_dict.get('enable_archive_scan', False) and ARCHIVE_SUPPORT_ENABLED
-    supported_archive_exts = tuple(e.lower() for e in archive_handler.get_supported_formats()) if enable_archive_scan else ()
+    
+    fmts = []
+    if enable_archive_scan:
+        for e in archive_handler.get_supported_formats():
+            e = e.lower().strip()
+            if not e.startswith('.'):
+                e = '.' + e
+            fmts.append(e)
+    supported_archive_exts = tuple(fmts)
 
     folder_cache = FolderStateCacheManager(root_folder)
     
@@ -180,6 +188,11 @@ def get_files_to_process(config_dict: Dict, image_cache_manager: ScannedImageCac
             log_error("時間篩選日期格式錯誤，將被忽略。"); time_filter['enabled'] = False
 
     live_folders, folders_to_scan_content, ghost_folders = _unified_scan_traversal(root_folder, excluded_paths, excluded_names, time_filter, folder_cache, progress_queue, control_events)
+
+    root_norm = _norm_key(config_dict['root_scan_folder'])
+    if root_norm in folders_to_scan_content:
+        log_warning("[保護] 根資料夾被標記為『變更』— 將改用保底模式（僅補快取缺口，不全面遞迴）。")
+        folders_to_scan_content.discard(root_norm)
 
     def _prune_to_leaf_changed(changed_set: set[str]) -> set[str]:
         changed = sorted(changed_set)
@@ -229,6 +242,10 @@ def get_files_to_process(config_dict: Dict, image_cache_manager: ScannedImageCac
 
     folders_needing_scan_due_to_empty_cache = unchanged_folders - augmented_cache_folders
 
+    if root_norm in folders_needing_scan_due_to_empty_cache:
+        folders_needing_scan_due_to_empty_cache.discard(root_norm)
+        log_warning("[保護] 根夾缺快取但已跳過保底補掃；如需掃描請改選子資料夾或取消根夾保護。")
+
     if folders_needing_scan_due_to_empty_cache:
         def _prune_to_leaf_only(cands: Set[str]) -> Set[str]:
             items = sorted(cands)
@@ -260,33 +277,58 @@ def get_files_to_process(config_dict: Dict, image_cache_manager: ScannedImageCac
 
     scanned_files = []
     
+    changed_container_cap = int(config_dict.get('changed_container_cap', 0) or 0)
+    def _container_mtime(p: str) -> float:
+        try: return os.path.getmtime(p)
+        except OSError: return 0.0
+
     for folder in sorted(list(folders_to_scan_content)):
         if control_events and control_events.get('cancel') and control_events['cancel'].is_set(): break
         
         temp_files_in_container = defaultdict(list)
         
-        for entry in _iter_scandir_recursively(folder, excluded_paths, excluded_names, control_events):
-            f_lower = entry.name.lower()
+        try:
+            with os.scandir(folder) as it:
+                for entry in it:
+                    if control_events and control_events.get('cancel') and control_events['cancel'].is_set(): break
+                    if entry.is_file():
+                        f_lower = entry.name.lower()
+                        if enable_archive_scan and f_lower.endswith(supported_archive_exts):
+                            temp_files_in_container[entry.path] = []
+                        elif f_lower.endswith(image_exts):
+                            temp_files_in_container[folder].append(_norm_key(entry.path))
             
-            if enable_archive_scan and f_lower.endswith(supported_archive_exts):
-                try:
-                    all_vpaths = []
-                    for arc_entry in archive_handler.iter_archive_images(entry.path):
-                        vpath = f"{config.VPATH_PREFIX}{arc_entry.archive_path}{config.VPATH_SEPARATOR}{arc_entry.inner_path}"
-                        all_vpaths.append(vpath)
-                    all_vpaths.sort(key=_natural_sort_key)
-                    temp_files_in_container[entry.path].extend(all_vpaths[-count:] if enable_limit else all_vpaths)
-                except Exception as e:
-                    log_error(f"讀取壓縮檔失敗: {entry.path}: {e}", True)
-            elif f_lower.endswith(image_exts):
-                temp_files_in_container[os.path.dirname(entry.path)].append(_norm_key(entry.path))
-        
-        for container_path, files in temp_files_in_container.items():
-            files.sort(key=_natural_sort_key)
-            if enable_limit:
-                scanned_files.extend(files[-count:])
-            else:
-                scanned_files.extend(files)
+            if changed_container_cap > 0:
+                archive_keys = [k for k in temp_files_in_container.keys() if os.path.splitext(k)[1].lower() in supported_archive_exts]
+                if len(archive_keys) > changed_container_cap:
+                    keep_archives = sorted(archive_keys, key=_container_mtime, reverse=True)[:changed_container_cap]
+                    dropped_count = len(archive_keys) - len(keep_archives)
+                    temp_files_in_container = {
+                        k: temp_files_in_container[k] for k in temp_files_in_container.keys()
+                        if (os.path.splitext(k)[1].lower() not in supported_archive_exts) or (k in keep_archives)
+                    }
+                    log_info(f"[變更夾容器上限] {folder} 僅保留近期壓縮檔 {len(keep_archives)} 個，捨棄 {dropped_count} 個")
+
+            for container_path, files in temp_files_in_container.items():
+                ext = os.path.splitext(container_path)[1].lower()
+                if ext in supported_archive_exts:
+                    try:
+                        all_vpaths = []
+                        for arc_entry in archive_handler.iter_archive_images(container_path):
+                            vpath = f"{config.VPATH_PREFIX}{arc_entry.archive_path}{config.VPATH_SEPARATOR}{arc_entry.inner_path}"
+                            all_vpaths.append(vpath)
+                        all_vpaths.sort(key=_natural_sort_key)
+                        files.extend(all_vpaths)
+                    except Exception as e:
+                        log_error(f"讀取壓縮檔失敗: {container_path}: {e}", True)
+                        continue
+                files.sort(key=_natural_sort_key)
+                if enable_limit:
+                    scanned_files.extend(files[-count:])
+                else:
+                    scanned_files.extend(files)
+        except OSError as e:
+            log_error(f"掃描資料夾 '{folder}' 時發生錯誤: {e}"); continue
 
         norm_folder = _norm_key(folder)
         if norm_folder in live_folders: 
@@ -307,6 +349,7 @@ def get_files_to_process(config_dict: Dict, image_cache_manager: ScannedImageCac
                         container_key = archive_path
                         parent_dir = _norm_key(os.path.dirname(archive_path))
                 else:
+                    if _get_file_stat(p)[2] is None: continue
                     parent_dir = _norm_key(os.path.dirname(p))
                     container_key = parent_dir
                 
@@ -324,9 +367,27 @@ def get_files_to_process(config_dict: Dict, image_cache_manager: ScannedImageCac
     folder_cache.save_cache()
     unique_files = sorted(list(set(final_file_list)))
     
-    if qr_mode and not enable_limit and qr_global_cap > 0 and len(unique_files) > qr_global_cap:
-        log_error(f"[防爆量] 提取總數 {len(unique_files)} 超過全域上限 {qr_global_cap}，將只處理末尾的 {qr_global_cap} 個檔案。")
-        unique_files = unique_files[-qr_global_cap:]
+    def _path_mtime_for_cap(p: str) -> float:
+        try:
+            if _is_virtual_path(p):
+                arch_path, _ = _parse_virtual_path(p)
+                return os.path.getmtime(arch_path) if arch_path and os.path.exists(arch_path) else 0.0
+            else:
+                return os.path.getmtime(p) if os.path.exists(p) else 0.0
+        except Exception: return 0.0
+
+    mode = str(config_dict.get('comparison_mode', '')).lower()
+    global_cap = int(config_dict.get('global_extract_cap', 0) or 0)
+
+    if mode != 'qr_detection' and global_cap > 0 and len(unique_files) > global_cap:
+        unique_files.sort(key=_path_mtime_for_cap, reverse=True)
+        kept = unique_files[:global_cap]
+        log_warning(f"[全域上限] 提取 {len(unique_files)} → {global_cap}（依 mtime 篩選最新）")
+        unique_files = kept
+    elif qr_mode and not enable_limit and qr_global_cap > 0 and len(unique_files) > qr_global_cap:
+        log_error(f"[防爆量] 提取總數 {len(unique_files)} 超過全域上限 {qr_global_cap}，將只處理最新 {qr_global_cap} 筆。")
+        unique_files.sort(key=_path_mtime_for_cap, reverse=True)
+        unique_files = unique_files[:qr_global_cap]
         
     log_info(f"檔案提取完成。從 {len(folders_to_scan_content)} 個新/變更夾掃描 {len(scanned_files)} 筆, 從 {len(unchanged_folders)} 個未變更夾恢復 {len(cached_files)} 筆。總計: {len(unique_files)}")
     return unique_files, {}
@@ -334,6 +395,8 @@ def get_files_to_process(config_dict: Dict, image_cache_manager: ScannedImageCac
 # ======================================================================
 # Section: 核心比對引擎
 # ======================================================================
+
+
 class ImageComparisonEngine:
     def __init__(self, config_dict: dict, progress_queue: Union[Queue, None] = None, control_events: Union[dict, None] = None):
         self.config = config_dict; self.progress_queue = progress_queue; self.control_events = control_events
@@ -371,7 +434,7 @@ class ImageComparisonEngine:
                 mode_map = { "ad_comparison": "廣告比對", "mutual_comparison": "互相比對", "qr_detection": "QR Code 檢測" }
                 mode_str = mode_map.get(mode, "未知")
                 log_info("=" * 50)
-                log_info(f"[引擎版本] 核心引擎 v1.9.6")
+                log_info(f"[引擎版本] 核心引擎 v1.9.8")
                 log_info(f"[模式檢查] 當前模式: {mode_str}")
                 log_info(f"[模式檢查] - 時間篩選: {'啓用' if self.config.get('enable_time_filter', False) else '關閉'}")
                 enable_limit = bool(self.config.get('enable_extract_count_limit', False))
@@ -419,6 +482,7 @@ class ImageComparisonEngine:
         
         paths_to_recalc, cache_hits = [], 0
         folders_to_rescan = set()
+        paths_to_purge = set()
 
         for path in list(current_task_list):
             cached_data = cache_manager.get_data(path)
@@ -427,8 +491,7 @@ class ImageComparisonEngine:
             
             if mt is None:
                 if cached_data:
-                    log_info(f"快取檔案不存在，從快取中移除: {path}")
-                    cache_manager.remove_data(path)
+                    paths_to_purge.add(path)
                 
                 parent_folder = os.path.dirname(path if not _is_virtual_path(path) else _parse_virtual_path(path)[0])
                 if os.path.isdir(parent_folder):
@@ -473,6 +536,7 @@ class ImageComparisonEngine:
                         f_lower = f.lower()
 
                         if self.config.get("enable_archive_scan", False) and \
+                           os.path.isfile(full_path) and \
                            os.path.splitext(f_lower)[1] in ('.zip', '.cbz', '.rar', '.cbr', '.7z'):
                             try:
                                 all_vpaths = []
@@ -508,6 +572,11 @@ class ImageComparisonEngine:
         else:
             if local_total > 0:
                 log_info(f"[局部] 快取檢查 - 命中: {cache_hits}/{local_total} | 進度: {local_completed}/{local_total}")
+        
+        if paths_to_purge:
+            log_info(f"正在從快取中批次移除 {len(paths_to_purge)} 個無效條目...")
+            for path in paths_to_purge:
+                cache_manager.remove_data(path)
         
         if not paths_to_recalc:
             cache_manager.save_cache()
@@ -573,6 +642,8 @@ class ImageComparisonEngine:
             time.sleep(0.05)
         cache_manager.save_cache()
         return True, local_file_data
+
+    # (後續所有函式 _build_phash_band_index, _find_similar_images, _detect_qr_codes 等都保持不變)
 
     def _build_phash_band_index(self, gallery_file_data: dict, bands=LSH_BANDS):
         seg_bits = HASH_BITS // bands

@@ -1,11 +1,11 @@
 # ======================================================================
 # 檔案名稱：config.py
 # 模組目的：存放 ComicTailCleaner 的全域常數與預設設定
-# 版本：1.1.0 (更新至 v14.5.0 並新增 QR 模式專屬設定)
+# 版本：1.2.0 (新增上限設定)
 # ======================================================================
 
 # === 應用程式基本資訊 ===
-APP_VERSION = "15.0.0"
+APP_VERSION = "15.0.1"
 APP_NAME_EN = "ComicTailCleaner"
 APP_NAME_TC = "漫畫尾頁廣告清理"
 CONFIG_FILE = "config.json"  # 用於保存使用者設定的檔案名稱
@@ -52,6 +52,9 @@ default_config = {
     'enable_ad_cross_comparison': True, # 在互相比對模式下，是否啟用與廣告庫的交叉比對來標記相似羣組
     'enable_color_filter': True, # 【新增】預設開啟
     'cross_comparison_include_bw': False, # 進行交叉比對時，是否也比對純黑/純白圖片
+    
+    'changed_container_cap': 500, # 限制單一變更夾最多處理的容器(壓縮檔/子資料夾)數量，0為不限制
+    'global_extract_cap': 100000,  # 非QR模式下的全域檔案提取上限，0為不限制
 
     # --- UI 顯示設定 ---
     'page_size': 'all',              # 結果列表中每頁顯示的項目數量
