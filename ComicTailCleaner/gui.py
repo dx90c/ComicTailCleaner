@@ -554,7 +554,7 @@ class MainWindow(tk.Tk):
         target_path_container = tk.Frame(self.target_image_frame, height=path_frame_height); target_path_container.pack(fill=tk.X, expand=False, pady=(5,0)); target_path_container.pack_propagate(False)
         self.target_path_label=ttk.Label(target_path_container,text="",wraplength=500, anchor="w", justify=tk.LEFT); self.target_path_label.pack(fill=tk.BOTH, expand=True)
         self.target_image_label.bind("<Button-1>",lambda e:self._on_preview_image_click(True))
-        self.compare_image_frame=ttk.LabelFrame(right_pane,text="羣組基準圖片預覽",padding="5"); right_pane.add(self.compare_image_frame,weight=1)
+        self.compare_image_frame=ttk.LabelFrame(right_pane,text="基準圖片預覽",padding="5"); right_pane.add(self.compare_image_frame,weight=1)
         self.compare_image_label=ttk.Label(self.compare_image_frame,cursor="hand2"); self.compare_image_label.pack(fill=tk.BOTH,expand=True)
         compare_path_container = tk.Frame(self.compare_image_frame, height=path_frame_height); compare_path_container.pack(fill=tk.X, expand=False, pady=(5,0)); compare_path_container.pack_propagate(False)
         self.compare_path_label=ttk.Label(compare_path_container,text="",wraplength=500, anchor="w", justify=tk.LEFT); self.compare_path_label.pack(fill=tk.BOTH, expand=True)

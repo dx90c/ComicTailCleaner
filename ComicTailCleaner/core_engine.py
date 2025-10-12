@@ -1,7 +1,7 @@
 # ======================================================================
 # 檔案名稱：core_engine.py
 # 模組目的：包含核心的比對引擎、檔案掃描與快取管理邏輯
-# 版本：2.0.1 (最終穩定版：整合所有健壯性修正與性能優化)
+# 版本：2.2.0 (引入廣告比對 Epoch 機制以實現增量比對)
 # ======================================================================
 
 import os
@@ -14,7 +14,7 @@ import platform
 from collections import deque, defaultdict
 from multiprocessing import Pool, cpu_count, Event, set_start_method
 from queue import Queue
-from typing import Union, Tuple, Dict, List, Set, Optional, Generator
+from typing import Union, Tuple, Dict, List, Set, Optional, Generator, Any
 
 # --- 第三方庫 ---
 try:
@@ -54,8 +54,8 @@ except ImportError:
 
 from processors.scanner import ScannedImageCacheManager, FolderStateCacheManager
 try:
-    from processors.qr_engine import (_pool_worker_detect_qr_code, 
-                                     _pool_worker_process_image_full, 
+    from processors.qr_engine import (_pool_worker_detect_qr_code,
+                                     _pool_worker_process_image_full,
                                      _pool_worker_process_image_phash_only)
     QR_ENGINE_ENABLED = True
 except ImportError:
@@ -68,6 +68,7 @@ except ImportError:
 # ======================================================================
 # Section: 全局常量與輔助函式
 # ======================================================================
+__version__ = "2.2.0"  # 單一真相來源
 HASH_BITS = 64
 PHASH_FAST_THRESH   = 0.80
 PHASH_STRICT_SKIP   = 0.93
@@ -80,6 +81,11 @@ LSH_BANDS = 4
 
 def _natural_sort_key(s: str) -> list:
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'([0-9]+)', s)]
+
+def _folder_time(st: os.stat_result, mode: str) -> float:
+    if mode == 'ctime':  return st.st_ctime
+    if mode == 'hybrid': return max(st.st_mtime, st.st_ctime)
+    return st.st_mtime
 
 def _iter_scandir_recursively(root_path: str, excluded_paths: set, excluded_names: set, control_events: Optional[dict]) -> Generator[os.DirEntry, None, None]:
     queue = deque([root_path])
@@ -97,10 +103,45 @@ def _iter_scandir_recursively(root_path: str, excluded_paths: set, excluded_name
                     if any(norm_path == ex or norm_path.startswith(ex + os.sep) for ex in excluded_paths) or base_name in excluded_names:
                         continue
 
-                    if entry.is_dir():
+                    if entry.is_dir(follow_symlinks=False):
                         queue.append(entry.path)
                     elif entry.is_file():
                         yield entry
+        except OSError:
+            continue
+
+def _iter_scandir_time_pruned(root_path: str, excluded_paths: set, excluded_names: set,
+                              control_events: Optional[dict], max_depth: int,
+                              start: Optional[datetime.datetime], end: Optional[datetime.datetime], time_mode: str) -> Generator[os.DirEntry, None, None]:
+    root_norm = _norm_key(root_path)
+    base_depth = root_norm.count(os.sep)
+    queue = deque([root_path])
+    while queue:
+        if control_events and control_events.get('cancel') and control_events['cancel'].is_set():
+            return
+        cur = queue.popleft()
+        norm_cur = _norm_key(cur)
+        if any(norm_cur == ex or norm_cur.startswith(ex + os.sep) for ex in excluded_paths) \
+           or os.path.basename(norm_cur).lower() in excluded_names:
+            continue
+        cur_depth = norm_cur.count(os.sep) - base_depth
+        try:
+            with os.scandir(cur) as it:
+                for entry in it:
+                    if entry.is_file():
+                        yield entry
+                    elif entry.is_dir(follow_symlinks=False):
+                        try:
+                            st = entry.stat(follow_symlinks=False)
+                            ts = _folder_time(st, time_mode)
+                            if start and datetime.datetime.fromtimestamp(ts) < start:
+                                continue
+                            if end and datetime.datetime.fromtimestamp(ts) > end:
+                                continue
+                        except OSError:
+                            continue
+                        if cur_depth < max_depth:
+                            queue.append(entry.path)
         except OSError:
             continue
 
@@ -108,55 +149,121 @@ def _iter_scandir_recursively(root_path: str, excluded_paths: set, excluded_name
 # Section: 高效檔案列舉
 # ======================================================================
 
-def _unified_scan_traversal(root_folder: str, excluded_paths: set, excluded_names: set, time_filter: dict, folder_cache: 'FolderStateCacheManager', progress_queue: Optional[Queue], control_events: Optional[dict]) -> tuple[dict, set, set]:
-    log_info("啟動 v2.0.1 統一掃描引擎...")
+def _scan_newest_first_recursive(path: str, time_filter: dict, excluded_paths: set, excluded_names: set, control_events: Optional[dict], stats: Dict[str, int], time_mode: str) -> Generator[str, None, None]:
+    if control_events and control_events.get('cancel') and control_events['cancel'].is_set():
+        return
+
+    norm_path = _norm_key(path)
+    base_name = os.path.basename(norm_path).lower()
+    if any(norm_path == ex or norm_path.startswith(ex + os.sep) for ex in excluded_paths) or base_name in excluded_names:
+        return
+
+    try:
+        stats['visited_dirs'] += 1
+        st = os.stat(path)
+        cur_ts = _folder_time(st, time_mode)
+        mtime_dt = datetime.datetime.fromtimestamp(cur_ts)
+        start = time_filter.get('start')
+        end   = time_filter.get('end')
+
+        if start and mtime_dt < start:
+            stats['pruned_by_start'] += 1
+            return
+
+        in_range = (not start or mtime_dt >= start) and (not end or mtime_dt <= end)
+        if in_range:
+            yield path
+        elif end and mtime_dt > end:
+            stats['skipped_by_end'] += 1
+
+        subdirs = []
+        with os.scandir(path) as it:
+            for entry in it:
+                if control_events and control_events.get('cancel') and control_events['cancel'].is_set(): return
+                if entry.is_dir(follow_symlinks=False):
+                    try:
+                        st_sub = entry.stat(follow_symlinks=False)
+                        subdirs.append((entry.path, _folder_time(st_sub, time_mode)))
+                    except OSError:
+                        continue
+        
+        subdirs.sort(key=lambda x: x[1], reverse=True)
+
+        processed_count = 0
+        for subdir_path, mt in subdirs:
+            if control_events and control_events.get('cancel') and control_events['cancel'].is_set(): return
+            if start and datetime.datetime.fromtimestamp(mt) < start:
+                stats['pruned_by_start'] += (len(subdirs) - processed_count)
+                break
+            processed_count += 1
+            yield from _scan_newest_first_recursive(subdir_path, time_filter, excluded_paths, excluded_names, control_events, stats, time_mode)
+    except OSError:
+        return
+
+def _unified_scan_traversal(root_folder: str, excluded_paths: set, excluded_names: set, time_filter: dict, folder_cache: 'FolderStateCacheManager', progress_queue: Optional[Queue], control_events: Optional[dict], use_pruning: bool, time_mode: str) -> Tuple[Dict[str, Any], Set[str], Set[str]]:
+    log_info(f"啟動 v{__version__} 統一掃描引擎...")
+    
+    if not use_pruning or not time_filter.get('enabled') or not time_filter.get('start'):
+        log_info("使用標準 BFS 掃描 (未啟用剪枝或時間篩選)。")
+        live_folders, changed_or_new_folders = {}, set()
+        queue = deque([root_folder])
+        scanned_count = 0
+        cached_states = folder_cache.cache.copy()
+        
+        while queue:
+            if control_events and control_events.get('cancel') and control_events['cancel'].is_set():
+                return {}, set(), set()
+            current_dir = queue.popleft()
+            norm_current_dir = _norm_key(current_dir)
+            if any(norm_current_dir == ex or norm_current_dir.startswith(ex + os.sep) for ex in excluded_paths) or os.path.basename(norm_current_dir).lower() in excluded_names:
+                continue
+            try:
+                stat_info = os.stat(current_dir)
+                cached_states.pop(norm_current_dir, None)
+                scanned_count += 1
+                if scanned_count % 100 == 0:
+                    time.sleep(0.001)
+                    if progress_queue: progress_queue.put({'type': 'text', 'text': f"📁 正在檢查資料夾結構... ({scanned_count})"})
+
+                live_folders[norm_current_dir] = {'mtime': stat_info.st_mtime, 'ctime': stat_info.st_ctime}
+                cached_entry = folder_cache.get_folder_state(norm_current_dir)
+                if not cached_entry or abs(_folder_time(stat_info, time_mode) - cached_entry.get('mtime', 0)) > 1e-6:
+                    changed_or_new_folders.add(norm_current_dir)
+
+                with os.scandir(current_dir) as it:
+                    for entry in it:
+                        if entry.is_dir(follow_symlinks=False):
+                            queue.append(entry.path)
+            except OSError: continue
+        
+        ghost_folders = set(cached_states.keys())
+        log_info(f"BFS 掃描完成。即時資料夾: {len(live_folders)}, 新/變更: {len(changed_or_new_folders)}, 幽靈資料夾: {len(ghost_folders)}")
+        return live_folders, changed_or_new_folders, ghost_folders
+
+    log_info("啟用時間篩選，使用智慧型遞迴剪枝 (DFS) 掃描...")
+    stats = defaultdict(int)
+    all_scanned_paths = list(_scan_newest_first_recursive(root_folder, time_filter, excluded_paths, excluded_names, control_events, stats, time_mode))
+    
     live_folders, changed_or_new_folders = {}, set()
-    queue = deque([root_folder])
-    scanned_count = 0
     cached_states = folder_cache.cache.copy()
-    root_norm_path = _norm_key(root_folder)
 
-    while queue:
-        if control_events and control_events.get('cancel') and control_events['cancel'].is_set():
-            return {}, set(), set()
-        
-        current_dir = queue.popleft()
-        norm_current_dir = _norm_key(current_dir)
-        
-        if any(norm_current_dir == ex or norm_current_dir.startswith(ex + os.sep) for ex in excluded_paths) or os.path.basename(norm_current_dir) in excluded_names:
-            continue
-        
+    for path in all_scanned_paths:
+        norm_path = _norm_key(path)
+        cached_states.pop(norm_path, None)
         try:
-            stat_info = os.stat(current_dir)
-            cached_states.pop(norm_current_dir, None)
-
-            if norm_current_dir != root_norm_path and time_filter.get('enabled'):
-                ctime_dt = datetime.datetime.fromtimestamp(stat_info.st_ctime)
-                if (time_filter.get('start') and ctime_dt < time_filter['start']) or \
-                   (time_filter.get('end') and ctime_dt > time_filter['end']):
-                    continue
-            
-            scanned_count += 1
-            if scanned_count % 100 == 0 and progress_queue:
-                progress_queue.put({'type': 'text', 'text': f"📁 正在檢查資料夾結構... ({scanned_count})"})
-
-            live_folders[norm_current_dir] = {'mtime': stat_info.st_mtime, 'ctime': stat_info.st_ctime}
-            
-            cached_entry = folder_cache.get_folder_state(norm_current_dir)
-            if not cached_entry or abs(stat_info.st_mtime - cached_entry.get('mtime', 0)) > 1e-6:
-                changed_or_new_folders.add(norm_current_dir)
-
-            with os.scandir(current_dir) as it:
-                for entry in it:
-                    if entry.is_dir():
-                        queue.append(entry.path)
+            stat_info = os.stat(path)
+            live_folders[norm_path] = {'mtime': stat_info.st_mtime, 'ctime': stat_info.st_ctime}
+            cached_entry = folder_cache.get_folder_state(norm_path)
+            if not cached_entry or abs(_folder_time(stat_info, time_mode) - cached_entry.get('mtime', 0)) > 1e-6:
+                changed_or_new_folders.add(norm_path)
         except OSError:
             continue
-    
+            
     ghost_folders = set(cached_states.keys())
-    log_info(f"統一掃描完成。即時(且符合時間)的資料夾: {len(live_folders)}, 新/變更: {len(changed_or_new_folders)}, 真正的幽靈資料夾: {len(ghost_folders)}")
+    log_info(f"DFS 掃描完成。訪問: {stats['visited_dirs']}, 起始日剪枝: {stats['pruned_by_start']}, 結束日跳過: {stats['skipped_by_end']}")
+    log_info(f"符合時間的資料夾: {len(live_folders)}, 新/變更: {len(changed_or_new_folders)}, 幽靈資料夾: {len(ghost_folders)}")
     return live_folders, changed_or_new_folders, ghost_folders
-
+    
 def get_files_to_process(config_dict: Dict, image_cache_manager: ScannedImageCacheManager, progress_queue: Optional[Queue] = None, control_events: Optional[Dict] = None) -> Tuple[List[str], Dict[str, int]]:
     root_folder = config_dict['root_scan_folder']
     if not os.path.isdir(root_folder): return [], {}
@@ -187,7 +294,9 @@ def get_files_to_process(config_dict: Dict, image_cache_manager: ScannedImageCac
         except (ValueError, TypeError):
             log_error("時間篩選日期格式錯誤，將被忽略。"); time_filter['enabled'] = False
 
-    live_folders, folders_to_scan_content, ghost_folders = _unified_scan_traversal(root_folder, excluded_paths, excluded_names, time_filter, folder_cache, progress_queue, control_events)
+    use_pruning = config_dict.get('enable_newest_first_pruning', True)
+    time_mode = str(config_dict.get('folder_time_mode', 'mtime'))
+    live_folders, folders_to_scan_content, ghost_folders = _unified_scan_traversal(root_folder, excluded_paths, excluded_names, time_filter, folder_cache, progress_queue, control_events, use_pruning, time_mode)
 
     root_norm = _norm_key(config_dict['root_scan_folder'])
     if root_norm in folders_to_scan_content:
@@ -214,9 +323,25 @@ def get_files_to_process(config_dict: Dict, image_cache_manager: ScannedImageCac
     
     if control_events and control_events.get('cancel') and control_events['cancel'].is_set(): return [], {}
 
+    use_time_window = bool(time_filter.get('enabled') and (time_filter.get('start') or time_filter.get('end')))
+    preserve = bool(config_dict.get('preserve_cache_across_time_windows', True))
+    strict_img_prune = bool(config_dict.get('prune_image_cache_on_missing_folder', False))
+
     if ghost_folders:
-        folder_cache.remove_folders(list(ghost_folders))
-        for folder in ghost_folders: image_cache_manager.remove_entries_from_folder(folder)
+        if use_time_window and preserve:
+            truly_missing = [f for f in ghost_folders if not os.path.exists(f)]
+            if truly_missing:
+                log_info(f"正在從狀態快取中移除 {len(truly_missing)} 個已不存在的資料夾...")
+                folder_cache.remove_folders(truly_missing)
+                if strict_img_prune:
+                    log_info(f"正在同步移除對應的圖片快取...")
+                    for folder in truly_missing:
+                        image_cache_manager.remove_entries_from_folder(folder)
+        else:
+            log_info(f"正在清理 {len(ghost_folders)} 個幽靈資料夾的快取...")
+            folder_cache.remove_folders(list(ghost_folders))
+            for folder in ghost_folders:
+                image_cache_manager.remove_entries_from_folder(folder)
 
     unchanged_folders = set(live_folders.keys()) - folders_to_scan_content
     
@@ -278,6 +403,9 @@ def get_files_to_process(config_dict: Dict, image_cache_manager: ScannedImageCac
     scanned_files = []
     
     changed_container_cap = int(config_dict.get('changed_container_cap', 0) or 0)
+    depth_limit = int(config_dict.get('changed_container_depth_limit', 1))
+    start, end = time_filter.get('start'), time_filter.get('end')
+
     def _container_mtime(p: str) -> float:
         try: return os.path.getmtime(p)
         except OSError: return 0.0
@@ -287,48 +415,37 @@ def get_files_to_process(config_dict: Dict, image_cache_manager: ScannedImageCac
         
         temp_files_in_container = defaultdict(list)
         
-        try:
-            with os.scandir(folder) as it:
-                for entry in it:
-                    if control_events and control_events.get('cancel') and control_events['cancel'].is_set(): break
-                    if entry.is_file():
-                        f_lower = entry.name.lower()
-                        if enable_archive_scan and f_lower.endswith(supported_archive_exts):
-                            temp_files_in_container[entry.path] = []
-                        elif f_lower.endswith(image_exts):
-                            temp_files_in_container[folder].append(_norm_key(entry.path))
-            
-            if changed_container_cap > 0:
-                archive_keys = [k for k in temp_files_in_container.keys() if os.path.splitext(k)[1].lower() in supported_archive_exts]
-                if len(archive_keys) > changed_container_cap:
-                    keep_archives = sorted(archive_keys, key=_container_mtime, reverse=True)[:changed_container_cap]
-                    dropped_count = len(archive_keys) - len(keep_archives)
-                    temp_files_in_container = {
-                        k: temp_files_in_container[k] for k in temp_files_in_container.keys()
-                        if (os.path.splitext(k)[1].lower() not in supported_archive_exts) or (k in keep_archives)
-                    }
-                    log_info(f"[變更夾容器上限] {folder} 僅保留近期壓縮檔 {len(keep_archives)} 個，捨棄 {dropped_count} 個")
+        for entry in _iter_scandir_time_pruned(folder, excluded_paths, excluded_names, control_events, depth_limit, start, end, time_mode):
+            f_lower = entry.name.lower()
+            if enable_archive_scan and f_lower.endswith(supported_archive_exts):
+                temp_files_in_container[entry.path] = []
+            elif f_lower.endswith(image_exts):
+                temp_files_in_container[os.path.dirname(entry.path)].append(_norm_key(entry.path))
+        
+        if changed_container_cap > 0 and len(temp_files_in_container) > changed_container_cap:
+            keep = sorted(temp_files_in_container.keys(), key=_container_mtime, reverse=True)[:changed_container_cap]
+            dropped = len(temp_files_in_container) - len(keep)
+            temp_files_in_container = {k: temp_files_in_container[k] for k in keep}
+            log_info(f"[變更夾容器上限] {folder} 僅保留 {len(keep)} 個近期容器，捨棄 {dropped} 個")
 
-            for container_path, files in temp_files_in_container.items():
-                ext = os.path.splitext(container_path)[1].lower()
-                if ext in supported_archive_exts:
-                    try:
-                        all_vpaths = []
-                        for arc_entry in archive_handler.iter_archive_images(container_path):
-                            vpath = f"{config.VPATH_PREFIX}{arc_entry.archive_path}{config.VPATH_SEPARATOR}{arc_entry.inner_path}"
-                            all_vpaths.append(vpath)
-                        all_vpaths.sort(key=_natural_sort_key)
-                        files.extend(all_vpaths)
-                    except Exception as e:
-                        log_error(f"讀取壓縮檔失敗: {container_path}: {e}", True)
-                        continue
-                files.sort(key=_natural_sort_key)
-                if enable_limit:
-                    scanned_files.extend(files[-count:])
-                else:
-                    scanned_files.extend(files)
-        except OSError as e:
-            log_error(f"掃描資料夾 '{folder}' 時發生錯誤: {e}"); continue
+        for container_path, files in temp_files_in_container.items():
+            ext = os.path.splitext(container_path)[1].lower()
+            if ext in supported_archive_exts:
+                try:
+                    all_vpaths = []
+                    for arc_entry in archive_handler.iter_archive_images(container_path):
+                        vpath = f"{config.VPATH_PREFIX}{arc_entry.archive_path}{config.VPATH_SEPARATOR}{arc_entry.inner_path}"
+                        all_vpaths.append(vpath)
+                    all_vpaths.sort(key=_natural_sort_key)
+                    files.extend(all_vpaths)
+                except Exception as e:
+                    log_error(f"讀取壓縮檔失敗: {container_path}: {e}", True)
+                    continue
+            files.sort(key=_natural_sort_key)
+            if enable_limit:
+                scanned_files.extend(files[-count:])
+            else:
+                scanned_files.extend(files)
 
         norm_folder = _norm_key(folder)
         if norm_folder in live_folders: 
@@ -396,7 +513,6 @@ def get_files_to_process(config_dict: Dict, image_cache_manager: ScannedImageCac
 # Section: 核心比對引擎
 # ======================================================================
 
-
 class ImageComparisonEngine:
     def __init__(self, config_dict: dict, progress_queue: Union[Queue, None] = None, control_events: Union[dict, None] = None):
         self.config = config_dict; self.progress_queue = progress_queue; self.control_events = control_events
@@ -434,7 +550,7 @@ class ImageComparisonEngine:
                 mode_map = { "ad_comparison": "廣告比對", "mutual_comparison": "互相比對", "qr_detection": "QR Code 檢測" }
                 mode_str = mode_map.get(mode, "未知")
                 log_info("=" * 50)
-                log_info(f"[引擎版本] 核心引擎 v1.9.8")
+                log_info(f"[引擎版本] 核心引擎 v{__version__}")
                 log_info(f"[模式檢查] 當前模式: {mode_str}")
                 log_info(f"[模式檢查] - 時間篩選: {'啓用' if self.config.get('enable_time_filter', False) else '關閉'}")
                 enable_limit = bool(self.config.get('enable_extract_count_limit', False))
@@ -463,7 +579,11 @@ class ImageComparisonEngine:
                     return [], {}, [("系統錯誤", "QR 引擎未載入")]
                 result = self._detect_qr_codes(scan_cache_manager)
             else:
-                result = self._find_similar_images(scan_cache_manager)
+                ad_catalog_state = None
+                if mode == 'ad_comparison':
+                    ad_catalog_state = self._prepare_ad_catalog_epoch()
+
+                result = self._find_similar_images(scan_cache_manager, ad_catalog_state)
                 
             if result is None: return None
             found, data = result
@@ -471,6 +591,46 @@ class ImageComparisonEngine:
         finally:
             self._cleanup_pool()
     
+    def _prepare_ad_catalog_epoch(self) -> Dict:
+        """檢查廣告庫狀態，如果發生變更則提升 epoch 版本。"""
+        ad_folder_path = self.config.get('ad_folder_path')
+        if not ad_folder_path or not os.path.isdir(ad_folder_path):
+            return {'epoch': 0, 'is_new': False}
+
+        state_file = os.path.join(ad_folder_path, 'ad_catalog_state.json')
+        folder_cache = FolderStateCacheManager(ad_folder_path)
+        
+        current_state = {'epoch': 1, 'last_build_mtime': 0}
+        if os.path.exists(state_file):
+            try:
+                with open(state_file, 'r', encoding='utf-8') as f:
+                    current_state = json.load(f)
+            except (json.JSONDecodeError, IOError):
+                pass # 使用預設值重建
+
+        # 使用資料夾狀態快取來判斷廣告庫是否有變更
+        ad_root_state = folder_cache.get_folder_state(ad_folder_path)
+        ad_root_mtime = os.path.getmtime(ad_folder_path) if ad_root_state else 0
+
+        is_changed = False
+        if not ad_root_state or abs(ad_root_mtime - ad_root_state.get('mtime', 0)) > 1e-6:
+            is_changed = True
+        
+        if is_changed:
+            log_info("[Epoch] 檢測到廣告庫內容變更，Epoch 版本將提升。")
+            current_state['epoch'] += 1
+            current_state['last_build_mtime'] = ad_root_mtime
+            try:
+                with open(state_file, 'w', encoding='utf-8') as f:
+                    json.dump(current_state, f, indent=2)
+                folder_cache.update_folder_state(ad_folder_path, ad_root_mtime, os.path.getctime(ad_folder_path))
+                folder_cache.save_cache()
+            except IOError as e:
+                log_error(f"無法更新廣告庫狀態檔案: {e}")
+
+        log_info(f"[Epoch] 當前廣告庫 Epoch 版本為: {current_state['epoch']}")
+        return current_state
+
     def _process_images_with_cache(self, current_task_list: list[str], cache_manager: ScannedImageCacheManager, description: str, worker_function: callable, data_key: str, progress_scope: str = 'global') -> tuple[bool, dict]:
         if not current_task_list: return True, {}
         local_file_data = {}
@@ -643,8 +803,6 @@ class ImageComparisonEngine:
         cache_manager.save_cache()
         return True, local_file_data
 
-    # (後續所有函式 _build_phash_band_index, _find_similar_images, _detect_qr_codes 等都保持不變)
-
     def _build_phash_band_index(self, gallery_file_data: dict, bands=LSH_BANDS):
         seg_bits = HASH_BITS // bands
         mask = (1 << seg_bits) - 1
@@ -738,11 +896,29 @@ class ImageComparisonEngine:
         else:               ok = sim_w >= WHASH_TIER_4
         return (ok, min(sim_p, sim_w) if ok else sim_p)
 
-    def _find_similar_images(self, scan_cache_manager: ScannedImageCacheManager) -> Union[tuple[list, dict], None]:
-        continue_processing, self.file_data = self._process_images_with_cache(self.tasks_to_process, scan_cache_manager, "目標雜湊", _pool_worker_process_image_phash_only, 'phash', progress_scope='global')
+    def _find_similar_images(self, scan_cache_manager: ScannedImageCacheManager, ad_catalog_state: Optional[Dict] = None) -> Union[tuple[list, dict], None]:
+        tasks_to_process = self.tasks_to_process
+        is_ad_mode = self.config.get('comparison_mode') == 'ad_comparison'
+        current_epoch = 0
+        
+        if is_ad_mode and ad_catalog_state:
+            current_epoch = ad_catalog_state.get('epoch', 0)
+            
+            unmatched_tasks = []
+            for path in self.tasks_to_process:
+                cached_data = scan_cache_manager.get_data(path)
+                if not cached_data or cached_data.get('ad_epoch_done', 0) < current_epoch:
+                    unmatched_tasks.append(path)
+            
+            log_info(f"[Epoch] 總任務數: {len(self.tasks_to_process)}, 其中 {len(unmatched_tasks)} 個任務需要進行廣告比對。")
+            tasks_to_process = unmatched_tasks
+            self.completed_task_count = len(self.tasks_to_process) - len(tasks_to_process)
+            self.total_task_count = len(self.tasks_to_process)
+
+        continue_processing, self.file_data = self._process_images_with_cache(tasks_to_process, scan_cache_manager, "目標雜湊", _pool_worker_process_image_phash_only, 'phash', progress_scope='global')
         if not continue_processing: return None
         
-        gallery_data = self.file_data
+        gallery_data = {k: v for k, v in self.file_data.items() if k in tasks_to_process}
         
         user_thresh_percent = self.config.get('similarity_threshold', 95.0)
         is_mutual_mode = self.config.get('comparison_mode') == 'mutual_comparison'
@@ -781,7 +957,6 @@ class ImageComparisonEngine:
             'low_sat_thresh': 0.18 }
         
         ad_data, ad_cache_manager, leader_to_ad_group = {}, None, {}
-        is_ad_mode = self.config.get('comparison_mode') == 'ad_comparison'
         
         if is_ad_mode:
             self._update_progress(text="📦 正在預處理廣告庫...（此階段為局部進度）")
@@ -935,7 +1110,6 @@ class ImageComparisonEngine:
                                 sim = sim_from_hamming(h1 - h2, HASH_BITS) * 100
                                 value_str = f"{sim:.1f}%" + (" (似廣告)" if is_ad_like else "")
                                 found_items.append((leader, child, value_str))
-
             else:
                 for leader, children in final_groups.items():
                     for child in sorted([p for p in children if p != leader]):
@@ -966,7 +1140,19 @@ class ImageComparisonEngine:
             log_info(f"       └─ 最終有效匹配: {final_matches:,} ({(final_matches/passed_color*100 if passed_color > 0 else 0):.1f}%)")
         log_info("--------------------------")
         
-        self.file_data = {**gallery_data, **ad_data}
+        full_gallery_data = self.file_data
+        self.file_data = {**full_gallery_data, **ad_data}
+        
+        if is_ad_mode and current_epoch > 0:
+            log_info(f"[Epoch] 正在為 {len(tasks_to_process)} 個已處理的圖片更新 Epoch 標記至版本 {current_epoch}...")
+            for path in tasks_to_process:
+                norm_path = _norm_key(path)
+                if norm_path in self.file_data:
+                    self.file_data[norm_path]['ad_epoch_done'] = current_epoch
+                scan_cache_manager.update_data(norm_path, {'ad_epoch_done': current_epoch})
+            scan_cache_manager.save_cache()
+            log_info("[Epoch] Epoch 標記更新完成。")
+
         return found_items, self.file_data
 
     def _detect_qr_codes(self, scan_cache_manager: ScannedImageCacheManager) -> Union[tuple[list, dict], None]:

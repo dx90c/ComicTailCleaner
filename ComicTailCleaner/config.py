@@ -5,7 +5,7 @@
 # ======================================================================
 
 # === 應用程式基本資訊 ===
-APP_VERSION = "15.0.1"
+APP_VERSION = "15.1.1"
 APP_NAME_EN = "ComicTailCleaner"
 APP_NAME_TC = "漫畫尾頁廣告清理"
 CONFIG_FILE = "config.json"  # 用於保存使用者設定的檔案名稱
@@ -55,6 +55,11 @@ default_config = {
     
     'changed_container_cap': 500, # 限制單一變更夾最多處理的容器(壓縮檔/子資料夾)數量，0為不限制
     'global_extract_cap': 100000,  # 非QR模式下的全域檔案提取上限，0為不限制
+        # --- 【新增 v2.0.4】 ---
+    'enable_newest_first_pruning': True, # 啟用智慧型剪枝掃描，設為 false 則回退到傳統 BFS 掃描
+    # --- 【新增 v2.1.0】 ---
+    'changed_container_depth_limit': 1, # 處理變更夾時，向下遞迴掃描的深度上限
+    'folder_time_mode': 'mtime',        # 資料夾時間基準: 'mtime', 'ctime', 或 'hybrid' (取最大值)
 
     # --- UI 顯示設定 ---
     'page_size': 'all',              # 結果列表中每頁顯示的項目數量

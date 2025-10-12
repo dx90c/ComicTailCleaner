@@ -1,7 +1,7 @@
 # ======================================================================
 # 檔案名稱：processors/scanner.py
-# 模組目的：提供統一的文件掃描、緩存管理及多進程 workers
-# 版本：1.1.0 (整合所有底層掃描與緩存邏輯)
+# 模組目的：提供统一的文件扫描、缓存管理及多进程 workers
+# 版本：1.3.1 (Hotfix: 修正 _norm_key 未導入的錯誤)
 # ======================================================================
 
 import os
@@ -30,8 +30,11 @@ except ImportError:
 
 # --- 本地模組 ---
 from config import VPATH_PREFIX, VPATH_SEPARATOR
+# --- 【BUG 修正 v1.3.1】 ---
+# 補上對 _norm_key 的導入
 from utils import (log_info, log_error, _is_virtual_path, _parse_virtual_path, 
-                   CACHE_LOCK, _sanitize_path_for_filename, _open_image_from_any_path, _get_file_stat)
+                   CACHE_LOCK, _sanitize_path_for_filename, _open_image_from_any_path, 
+                   _get_file_stat, _norm_key)
 
 try:
     import archive_handler
@@ -115,20 +118,25 @@ def _pool_worker_process_image_phash_only(payload: Union[str, tuple]) -> tuple[s
 # === 快取管理類 ===
 class ScannedImageCacheManager:
     def __init__(self, root_scan_folder: str, ad_folder_path: Union[str, None] = None, comparison_mode: str = 'mutual_comparison'):
+        
+        # --- 【v1.3.0 修正】 ---
+        # 統一快取檔名，不再與模式掛鉤
         sanitized_root = _sanitize_path_for_filename(root_scan_folder)
-        cache_suffix = "_ad_comparison" if comparison_mode == 'ad_comparison' else ""
-        base_name = f"scanned_hashes_cache_{sanitized_root}{cache_suffix}"
+        base_name = f"scanned_hashes_cache_{sanitized_root}"
+        
         self.cache_file_path = f"{base_name}.json"
         counter = 1
-        norm_root = os.path.normpath(root_scan_folder).lower()
+        norm_root = _norm_key(root_scan_folder)
         while os.path.exists(self.cache_file_path):
             try:
                 with open(self.cache_file_path, 'r', encoding='utf-8') as f: data = json.load(f)
-                first_key = next(iter(data), None)
-                if not first_key or os.path.normpath(first_key).lower().startswith(norm_root): break
+                # 簡單檢查快取是否屬於此根目錄
+                first_key = next(iter(data.get('images', {})), None)
+                if not first_key or _norm_key(first_key).startswith(norm_root): break
             except (json.JSONDecodeError, StopIteration, TypeError, AttributeError): break
             self.cache_file_path = f"{base_name}_{counter}.json"; counter += 1
             if counter > 10: log_error("圖片快取檔名衝突過多。"); break
+        
         self.cache = self._load_cache()
         log_info(f"[快取] 圖片快取已初始化: '{self.cache_file_path}'")
     def _normalize_loaded_data(self, data: dict) -> dict:
