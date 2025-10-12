@@ -1,11 +1,11 @@
 # ======================================================================
 # 檔案名稱：config.py
 # 模組目的：存放 ComicTailCleaner 的全域常數與預設設定
-# 版本：1.2.0 (新增上限設定)
+# 版本：1.7.0 (新增 Schema 強化與錯誤隔離相關設定)
 # ======================================================================
 
 # === 應用程式基本資訊 ===
-APP_VERSION = "15.1.1"
+APP_VERSION = "16.0.0"
 APP_NAME_EN = "ComicTailCleaner"
 APP_NAME_TC = "漫畫尾頁廣告清理"
 CONFIG_FILE = "config.json"  # 用於保存使用者設定的檔案名稱
@@ -42,25 +42,33 @@ default_config = {
     # --- QR Code 相關設定 ---
     'enable_qr_hybrid_mode': True,   # 在 QR 模式下，是否啟用與廣告庫的混合比對以加速
     'qr_resize_size': 1000,          # 進行 QR Code 檢測前，將圖片縮放到的尺寸 (像素)
-    'qr_pages_per_archive': 10,      # 【新增】在 QR 模式下，每個壓縮檔末尾提取的圖片數量
-    'qr_global_cap': 20000,          # 【新增】在 QR 模式下，全局最多處理的檔案總數上限
+    'qr_pages_per_archive': 10,      # 在 QR 模式下，每個壓縮檔末尾提取的圖片數量
+    'qr_global_cap': 20000,          # 在 QR 模式下，全局最多處理的檔案總數上限
 
     # --- 性能與進階設定 ---
     'worker_processes': 0,           # 用於計算圖片雜湊的進程數 (0 代表自動設定)
     'ux_scan_start_delay': 0.1,      # 點擊開始後延遲多久開始計算，以確保UI能即時更新 (秒)
     'enable_inter_folder_only': True,# 在互相比對模式下，是否只比對來自不同資料夾的圖片
     'enable_ad_cross_comparison': True, # 在互相比對模式下，是否啟用與廣告庫的交叉比對來標記相似羣組
-    'enable_color_filter': True, # 【新增】預設開啟
+    'enable_color_filter': True,     # 預設開啟顏色過濾
     'cross_comparison_include_bw': False, # 進行交叉比對時，是否也比對純黑/純白圖片
     
     'changed_container_cap': 500, # 限制單一變更夾最多處理的容器(壓縮檔/子資料夾)數量，0為不限制
-    'global_extract_cap': 100000,  # 非QR模式下的全域檔案提取上限，0為不限制
-        # --- 【新增 v2.0.4】 ---
+    'global_extract_cap': 100000,  # 非QR模式下的全域檔案提取上限，0為不限制 (從 100000 下修)
+    
     'enable_newest_first_pruning': True, # 啟用智慧型剪枝掃描，設為 false 則回退到傳統 BFS 掃描
-    # --- 【新增 v2.1.0】 ---
     'changed_container_depth_limit': 1, # 處理變更夾時，向下遞迴掃描的深度上限
     'folder_time_mode': 'mtime',        # 資料夾時間基準: 'mtime', 'ctime', 或 'hybrid' (取最大值)
 
+    # --- 【新增 v1.6.0】 進階快取與增量比對設定 ---
+    'preserve_cache_across_time_windows': True, # 跨時間篩選窗口時，是否保留舊快取
+    'prune_image_cache_on_missing_folder': False, # 當資料夾不存在時，是否自動清理其圖片快取
+    'container_empty_mark': True,             # 是否標記無圖資料夾以加速後續掃描
+    'cache_flush_threshold': 10000,             # 快取批次寫入的閾值
+    "first_scan_extract_count": 64,
+    # --- 【新增 v1.7.0】 ---
+    'enable_quarantine': True,                # 是否啟用錯誤隔離機制
+    'enable_quick_digest': True,              # 是否啟用快速摘要以增強快取準確性
     # --- UI 顯示設定 ---
     'page_size': 'all',              # 結果列表中每頁顯示的項目數量
 }

@@ -1,7 +1,7 @@
 # ======================================================================
 # 檔案名稱：utils.py
 # 模組目的：提供通用的輔助函式，如日誌、路徑處理、依賴檢查等
-# 版本：1.1.2 (修正版：補全 _norm_key 並修正 log_error 簽名)
+# 版本：1.2.0 (新增 xxhash 支援與 quick_digest 計算)
 # ======================================================================
 
 import os
@@ -59,6 +59,11 @@ try:
 except Exception:
     QR_SCAN_ENABLED = False
 
+try:
+    import xxhash
+except ImportError:
+    xxhash = None
+
 __all__ = [
     'log_info', 'log_error', 'log_warning', 'log_performance',
     '_norm_key', '_is_virtual_path', '_parse_virtual_path', '_sanitize_path_for_filename',
@@ -66,6 +71,22 @@ __all__ = [
     '_avg_hsv', '_color_gate', '_open_folder', 'check_and_install_packages',
     'load_config', 'save_config', 'CACHE_LOCK', 'ARCHIVE_SUPPORT_ENABLED', 'QR_SCAN_ENABLED'
 ]
+
+# --- 【v1.2.0 新增】 ---
+def _calculate_quick_digest(path: str) -> Optional[str]:
+    """計算檔案前 64KB 的 xxhash64 摘要，用於快速內容驗證。"""
+    if not xxhash:
+        return None
+    try:
+        hasher = xxhash.xxh64()
+        with _open_image_from_any_path(path, read_bytes=True) as f:
+            if f is None: return None
+            chunk = f.read(65536) # 64KB
+            hasher.update(chunk)
+        return hasher.hexdigest()
+    except Exception:
+        return None
+# --- 【新增結束】 ---
 
 def _norm_key(p: str) -> str:
     """統一路徑表示，從 core_engine 移至此處成為公共函式。"""

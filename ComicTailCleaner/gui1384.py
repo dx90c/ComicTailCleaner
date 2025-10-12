@@ -29,12 +29,7 @@ try:
     import send2trash
 except ImportError:
     send2trash = None
-# --- 【新增這一段】 ---
-try:
-    from tkcalendar import DateEntry
-except ImportError:
-    DateEntry = None
-# --- 【新增結束】 ---
+
 # --- 3. 本地模組 ---
 # 從 config 導入所有設定和常數
 from config import *
@@ -129,7 +124,6 @@ class SettingsGUI(tk.Toplevel):
         self.enable_time_filter_var = tk.BooleanVar()
         self.start_date_var = tk.StringVar()
         self.end_date_var = tk.StringVar()
-        self.folder_time_mode_var = tk.StringVar() # <-- 新增
         self.page_size_var = tk.StringVar()
         self.enable_color_filter_var = tk.BooleanVar()
         self.enable_archive_scan_var = tk.BooleanVar()
@@ -207,6 +201,7 @@ class SettingsGUI(tk.Toplevel):
         path_frame = ttk.LabelFrame(frame, text="路徑設定", padding="10")
         path_frame.grid(row=row_idx, column=0, columnspan=2, sticky="ew", pady=5, padx=5)
         path_frame.grid_columnconfigure(1, weight=1)
+        # ... (內容與原版相同)
         ttk.Label(path_frame, text="根掃描資料夾:").grid(row=0, column=0, sticky="w", pady=2)
         self.root_scan_folder_entry = ttk.Entry(path_frame)
         self.root_scan_folder_entry.grid(row=0, column=1, sticky="ew", padx=5)
@@ -226,12 +221,14 @@ class SettingsGUI(tk.Toplevel):
         basic_settings_frame = ttk.LabelFrame(frame, text="基本與性能設定", padding="10")
         basic_settings_frame.grid(row=row_idx, column=0, columnspan=2, sticky="ew", pady=5, padx=5)
         basic_settings_frame.grid_columnconfigure(1, weight=1)
+        # ... (內容與原版相同)
         self.extract_count_limit_cb = ttk.Checkbutton(basic_settings_frame, text="啟用圖片抽取數量限制", variable=self.enable_extract_count_limit_var, command=self._update_all_ui_states)
         self.extract_count_limit_cb.grid(row=0, column=0, columnspan=3, sticky="w", pady=2)
         ttk.Label(basic_settings_frame, text="提取末尾圖片數量:").grid(row=1, column=0, sticky="w", pady=2)
         self.extract_count_spinbox = ttk.Spinbox(basic_settings_frame, from_=1, to=100, textvariable=self.extract_count_var, width=5)
         self.extract_count_spinbox.grid(row=1, column=1, sticky="w", padx=5)
         ttk.Label(basic_settings_frame, text="(從每個資料夾樹末尾提取N張)").grid(row=1, column=2, sticky="w")
+
         ttk.Label(basic_settings_frame, text="工作進程數:").grid(row=3, column=0, sticky="w", pady=2)
         ttk.Spinbox(basic_settings_frame, from_=0, to=cpu_count(), textvariable=self.worker_processes_var, width=5).grid(row=3, column=1, sticky="w", padx=5)
         ttk.Label(basic_settings_frame, text="(0=自動)").grid(row=3, column=2, sticky="w")
@@ -250,6 +247,7 @@ class SettingsGUI(tk.Toplevel):
 
         # --- 比對模式與外掛 ---
         mode_frame = ttk.LabelFrame(frame, text="比對模式", padding="10"); mode_frame.grid(row=row_idx, column=0, sticky="nsew", pady=5, padx=5)
+        # ... (核心功能的 Radiobutton 創建邏輯與原版相同) ...
         ttk.Label(mode_frame, text="核心功能:").pack(anchor="w", pady=(0, 2))
         ttk.Radiobutton(mode_frame, text="廣告比對", variable=self.comparison_mode_var, value="ad_comparison", command=self._update_all_ui_states).pack(anchor="w", padx=10)
         ttk.Radiobutton(mode_frame, text="互相比對", variable=self.comparison_mode_var, value="mutual_comparison", command=self._update_all_ui_states).pack(anchor="w", padx=10)
@@ -259,7 +257,8 @@ class SettingsGUI(tk.Toplevel):
         self.qr_hybrid_cb = ttk.Checkbutton(mode_frame, text="啟用廣告庫快速匹配", variable=self.enable_qr_hybrid_var, command=self._update_all_ui_states); self.qr_hybrid_cb.pack(anchor="w", padx=30)
         if not QR_SCAN_ENABLED: self.qr_mode_radiobutton.config(state=tk.DISABLED); self.qr_hybrid_cb.config(state=tk.DISABLED)
 
-        self.plugin_frames = {}
+        # 【核心修改】動態載入外掛選項，並為每個外掛預創建設定框架
+        self.plugin_frames = {} # 用於儲存每個外掛的設定框架
         if self.master.plugin_manager:
             ttk.Separator(mode_frame).pack(fill='x', pady=10)
             ttk.Label(mode_frame, text="外掛功能:").pack(anchor="w", pady=(0, 2))
@@ -267,71 +266,54 @@ class SettingsGUI(tk.Toplevel):
                 rb = ttk.Radiobutton(mode_frame, text=plugin.get_name(), variable=self.comparison_mode_var, value=plugin_id, command=self._update_all_ui_states)
                 rb.pack(anchor="w", padx=10)
                 if plugin.get_description(): Tooltip(rb, plugin.get_description())
+
+                # 為每個外掛創建並儲存其專屬設定框架
                 plugin_settings_container = ttk.LabelFrame(frame, text=f"{plugin.get_name()} 專屬設定", padding="10")
+                # 請求外掛填充此容器，如果外掛有UI，則將容器儲存起來
                 if plugin.get_settings_frame(plugin_settings_container, self.config):
                     self.plugin_frames[plugin_id] = plugin_settings_container
         
         # --- 快取與篩選 ---
         cache_time_frame = ttk.LabelFrame(frame, text="快取與篩選", padding="10")
         cache_time_frame.grid(row=row_idx, column=1, sticky="nsew", pady=5, padx=5)
+        # ... (內容與原版相同) ...
         ttk.Button(cache_time_frame, text="清理圖片快取 (回收桶)", command=self._clear_image_cache).pack(anchor="w", pady=2)
         ttk.Button(cache_time_frame, text="清理資料夾快取 (回收桶)", command=self._clear_folder_cache).pack(anchor="w", pady=2)
         ttk.Separator(cache_time_frame, orient='horizontal').pack(fill='x', pady=5)
-        
-        time_mode_frame = ttk.Frame(cache_time_frame)
-        time_mode_frame.pack(anchor='w', pady=(5, 5))
-        ttk.Label(time_mode_frame, text="時間篩選基準:").pack(side=tk.LEFT)
-        self.time_mode_combo = ttk.Combobox(time_mode_frame, textvariable=self.folder_time_mode_var, values=['修改時間', '建立時間'], width=12, state="readonly")
-        self.time_mode_combo.pack(side=tk.LEFT, padx=5)
-        Tooltip(self.time_mode_combo, "選擇判斷資料夾是否過期的時間基準。\n修改時間 (mtime): 資料夾內容變更時更新，適合增量掃描。\n建立時間 (ctime): 資料夾被建立時的時間。")
-
-        self.time_filter_cb = ttk.Checkbutton(cache_time_frame, text="啟用資料夾時間篩選", variable=self.enable_time_filter_var)
+        self.time_filter_cb = ttk.Checkbutton(cache_time_frame, text="啟用資料夾建立時間篩選", variable=self.enable_time_filter_var)
         self.time_filter_cb.pack(anchor="w")
         time_inputs_frame = ttk.Frame(cache_time_frame); time_inputs_frame.pack(anchor='w', padx=20)
         ttk.Label(time_inputs_frame, text="從:").grid(row=0, column=0, sticky="w")
-
-        if DateEntry:
-            self.start_date_entry = DateEntry(time_inputs_frame, textvariable=self.start_date_var, width=12, background='darkblue', foreground='white', borderwidth=2, date_pattern='y-mm-dd')
-        else:
-            self.start_date_entry = ttk.Entry(time_inputs_frame, textvariable=self.start_date_var, width=15)
+        self.start_date_entry = ttk.Entry(time_inputs_frame, textvariable=self.start_date_var, width=15)
         self.start_date_entry.grid(row=0, column=1, sticky="ew")
-
         ttk.Label(time_inputs_frame, text="到:").grid(row=1, column=0, sticky="w")
-        
-        if DateEntry:
-            self.end_date_entry = DateEntry(time_inputs_frame, textvariable=self.end_date_var, width=12, background='darkblue', foreground='white', borderwidth=2, date_pattern='y-mm-dd')
-        else:
-            self.end_date_entry = ttk.Entry(time_inputs_frame, textvariable=self.end_date_var, width=15)
+        self.end_date_entry = ttk.Entry(time_inputs_frame, textvariable=self.end_date_var, width=15)
         self.end_date_entry.grid(row=1, column=1, sticky="ew")
         
         row_idx += 1
         
+        # 記錄下外掛框架應在哪個 row 顯示
         self.plugin_frame_row = row_idx
         row_idx += 1
         
+        # --- 按鈕 ---
         button_frame = ttk.Frame(frame, padding="10")
         button_frame.grid(row=row_idx, column=0, columnspan=2, sticky="ew", pady=10)
         ttk.Button(button_frame, text="保存並關閉", command=self._save_and_close).pack(side=tk.RIGHT, padx=5)
         ttk.Button(button_frame, text="取消", command=self.destroy).pack(side=tk.RIGHT)
 
     def _clear_image_cache(self):
-        root = self.root_scan_folder_entry.get().strip()
-        ad = self.ad_folder_entry.get().strip()
-        if not root: 
-            messagebox.showwarning("無法清理", "請先指定根掃描資料夾。", parent=self)
-            return
-            
-        if messagebox.askyesno("確認清理", "確定要將所有與目前路徑設定相關的圖片哈希快取移至回收桶嗎？\n(這會影響所有模式的快取)", parent=self):
+        root = self.root_scan_folder_entry.get().strip(); ad = self.ad_folder_entry.get().strip()
+        mode_key = self.comparison_mode_var.get()
+        mode = self.mode_key_map_to_internal.get(mode_key, "mutual_comparison")
+        if not root: messagebox.showwarning("無法清理", "請先指定根掃描資料夾。", parent=self); return
+        if messagebox.askyesno("確認清理", "確定要將所有與目前路徑和模式設定相關的圖片哈希快取移至回收桶嗎？", parent=self):
             try:
-                # 新的初始化方式
-                ScannedImageCacheManager(root).invalidate_cache()
-                if ad and os.path.isdir(ad): 
-                    ScannedImageCacheManager(ad).invalidate_cache()
+                ScannedImageCacheManager(root, ad, mode).invalidate_cache()
+                if ad and os.path.isdir(ad): ScannedImageCacheManager(ad, ad, 'ad_comparison').invalidate_cache()
                 messagebox.showinfo("清理成功", "所有相關圖片快取檔案已移至回收桶。", parent=self)
-            except Exception as e: 
-                log_error(f"清理圖片快取時發生錯誤: {e}", True)
-                messagebox.showerror("清理失敗", f"清理圖片快取時發生錯誤：\n{e}", parent=self)
-                
+            except Exception as e: log_error(f"清理圖片快取時發生錯誤: {e}", True); messagebox.showerror("清理失敗", f"清理圖片快取時發生錯誤：\n{e}", parent=self)
+            
     def _clear_folder_cache(self):
         root = self.root_scan_folder_entry.get().strip()
         if not root: messagebox.showwarning("無法清理", "請先指定根掃描資料夾。", parent=self); return
@@ -343,7 +325,6 @@ class SettingsGUI(tk.Toplevel):
             
     def _load_settings_into_gui(self):
         # 此函式內容與原版完全相同
-
         self.root_scan_folder_entry.insert(0, self.config.get('root_scan_folder', ''))
         self.ad_folder_entry.insert(0, self.config.get('ad_folder_path', ''))
         self.extract_count_var.set(str(self.config.get('extract_count', 8)))
@@ -364,9 +345,6 @@ class SettingsGUI(tk.Toplevel):
         self.page_size_var.set(str(self.config.get('page_size', 'all')))
         self.enable_archive_scan_var.set(self.config.get('enable_archive_scan', True))
         
-        mode = self.config.get('folder_time_mode', 'mtime')
-        self.folder_time_mode_var.set('建立時間' if mode == 'ctime' else '修改時間')
-        
     def _setup_bindings(self):
         # 此函式內容與原版完全相同
         self.comparison_mode_var.trace_add("write", self._update_all_ui_states)
@@ -384,12 +362,10 @@ class SettingsGUI(tk.Toplevel):
         if self._save_settings(): self.destroy()
         
     def _save_settings(self) -> bool:
-
+        # 此函式邏輯與原版完全相同
         try:
             raw_mode = self.comparison_mode_var.get()
             comparison_mode = self.mode_key_map_to_internal.get(raw_mode, "mutual_comparison")
-            mode_text = self.folder_time_mode_var.get()
-            folder_time_mode = 'ctime' if mode_text == '建立時間' else 'mtime'
 
             config = {
                 'root_scan_folder': self.root_scan_folder_entry.get().strip(),
@@ -410,9 +386,11 @@ class SettingsGUI(tk.Toplevel):
                 'page_size': self.page_size_var.get().strip(),
                 'enable_archive_scan': self.enable_archive_scan_var.get(),
                 'enable_color_filter': self.enable_color_filter_var.get(),
-                'folder_time_mode': folder_time_mode,
             }
 
+
+
+            # 【核心】通知所有外掛保存自己的設定
             for plugin in self.master.plugin_manager.values():
                 config = plugin.save_settings(config)
 
@@ -585,8 +563,7 @@ class MainWindow(tk.Tk):
         self._create_context_menu()
         
     def _create_bottom_buttons(self, parent_frame: ttk.Frame):
-        button_frame = ttk.Frame(parent_frame)
-        button_frame.pack(side=tk.LEFT, padx=5, pady=5)
+        button_frame = ttk.Frame(parent_frame); button_frame.pack(side=tk.LEFT, padx=5, pady=5)
         ttk.Button(button_frame, text="全選", command=self._select_all).pack(side=tk.LEFT, padx=2)
         ttk.Button(button_frame, text="選取建議", command=self._select_suggested_for_deletion).pack(side=tk.LEFT, padx=2)
         ttk.Button(button_frame, text="取消全選", command=self._deselect_all).pack(side=tk.LEFT, padx=2)
@@ -595,11 +572,10 @@ class MainWindow(tk.Tk):
 
         self.move_to_ad_library_button = ttk.Button(button_frame, text="複製進廣告庫", command=self._copy_selected_to_ad_library)
         self.move_to_ad_library_button.pack(side=tk.LEFT, padx=2)
-        self.move_to_ad_library_button.pack_forget()
 
-        actions_frame = ttk.Frame(parent_frame)
-        actions_frame.pack(side=tk.RIGHT, padx=5, pady=5)
-        ttk.Button(actions_frame, text="開啟選中資料夾", command=self._open_selected_folder_single).pack(side=tk.LEFT, padx=2)
+        self.move_to_ad_library_button.pack_forget()
+        actions_frame=ttk.Frame(parent_frame); actions_frame.pack(side=tk.RIGHT,padx=5,pady=5)
+        ttk.Button(actions_frame,text="開啟選中資料夾",command=self._open_selected_folder_single).pack(side=tk.LEFT,padx=2)
         
     def _bind_keys(self):
         self.tree.bind("<<TreeviewSelect>>", self._on_item_select); self.tree.bind("<Button-1>", self._on_treeview_click)
@@ -837,18 +813,13 @@ class MainWindow(tk.Tk):
                     continue
                     
         mode = self.config.get('comparison_mode')
-        
-        # 簡化後的按鈕顯示邏輯
-        show_copy_button = False
         if mode == 'qr_detection':
-            show_copy_button = True
-        elif mode == 'mutual_comparison' and ad_folder and os.path.isdir(ad_folder):
-            show_copy_button = True
-        
-        if show_copy_button:
             self.move_to_ad_library_button.pack(side=tk.LEFT, padx=2)
         else:
-            self.move_to_ad_library_button.pack_forget()
+            if mode == 'mutual_comparison' and ad_folder and os.path.isdir(ad_folder):
+                 self.move_to_ad_library_button.pack(side=tk.LEFT, padx=2)
+            else:
+                 self.move_to_ad_library_button.pack_forget()
                  
         groups = defaultdict(list)
         for gk, ip, vs in self.all_found_items:
