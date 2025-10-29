@@ -16,6 +16,7 @@ from multiprocessing import Pool, cpu_count, Event, set_start_method
 from queue import Queue
 from typing import Union, Tuple, Dict, List, Set, Optional, Generator, Any
 
+
 # --- 第三方库 ---
 try:
     import imagehash
@@ -182,7 +183,8 @@ class ImageComparisonEngine:
             
             if self.config.get('enable_quarantine', True):
                 try:
-                    with open('quarantine.json', 'r', encoding='utf-8') as f:
+                    from config import QUARANTINE_FILE
+                    with open(QUARANTINE_FILE, 'r', encoding='utf-8') as f:
                         self.quarantine_list = set(json.load(f))
                         if self.quarantine_list:
                             log_info(f"[隔離區] 成功載入 {len(self.quarantine_list)} 個已知錯誤檔案。")
@@ -243,8 +245,9 @@ class ImageComparisonEngine:
                 if updated_quarantine != self.quarantine_list:
                     log_info(f"[隔離區] 新增 {len(new_failures)} 個錯誤檔案到隔離區，總數: {len(updated_quarantine)}")
                     try:
-                        with open('quarantine.json', 'w', encoding='utf-8') as f:
-                            json.dump(list(updated_quarantine), f, indent=2)
+                        from config import QUARANTINE_FILE
+                        with open(QUARANTINE_FILE, 'w', encoding='utf-8') as f:
+                            json.dump(list(updated_quarantine), f, ensure_ascii=False, indent=2)
                     except IOError as e:
                         log_error(f"無法寫入隔離區檔案: {e}")
             self._cleanup_pool()

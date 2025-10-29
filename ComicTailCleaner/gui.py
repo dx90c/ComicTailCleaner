@@ -1,7 +1,7 @@
 # ======================================================================
 # 檔案名稱：gui.py
-# 模組目的：包含所有 Tkinter 使用者介面元件
-# 版本：1.4.1 (修正 import 結構)
+# 模組目的：包含所有 UI 元件，並新增前置處理器支援
+# 版本：1.8.4 (UI 重構: 智慧型外掛啟用 UI)
 # ======================================================================
 
 # --- 1. 標準函式庫 ---
@@ -29,30 +29,24 @@ try:
     import send2trash
 except ImportError:
     send2trash = None
-# --- 【新增這一段】 ---
 try:
     from tkcalendar import DateEntry
 except ImportError:
     DateEntry = None
-# --- 【新增結束】 ---
+    
 # --- 3. 本地模組 ---
-# 從 config 導入所有設定和常數
-from config import *
-
-# 從 utils 導入所有需要的輔助函式
+from config import CONFIG_FILE, default_config, APP_NAME_TC, APP_VERSION
 import utils
 from utils import (log_info, log_error, log_performance, save_config, load_config, 
                    _is_virtual_path, _parse_virtual_path, _open_folder, _get_file_stat, 
-                   _open_image_from_any_path, # <--- 【核心修正】在這裏加入                   
-                   ARCHIVE_SUPPORT_ENABLED, QR_SCAN_ENABLED)
+                   _open_image_from_any_path, 
+                   ARCHIVE_SUPPORT_ENABLED, QR_SCAN_ENABLED, VPATH_SEPARATOR)
 
-# 導入外掛「契約」
 try:
     from plugins.base_plugin import BasePlugin
 except ImportError:
     BasePlugin = None 
 
-# 導入核心引擎和內建處理器
 from core_engine import ImageComparisonEngine
 from processors.comparison_processor import ComparisonProcessor
 from processors.qr_processor import QrProcessor
@@ -87,36 +81,21 @@ class Tooltip:
         tw = self.tooltip_window; self.tooltip_window = None
         if tw: tw.destroy()
 
-
-
-
-
-
-# --- 主要修改後的程式碼 ---
-
 class SettingsGUI(tk.Toplevel):
     def __init__(self, master: "MainWindow"):
         super().__init__(master)
         self.master = master
         self.config = master.config.copy()
-        self.plugin_ui_vars = {} # 儲存所有外掛的 UI 變量
+        self.plugin_ui_vars = {} 
 
-        # --- 變數初始化 ---
         self.enable_extract_count_limit_var = tk.BooleanVar()
         self.extract_count_var = tk.StringVar()
         self.worker_processes_var = tk.StringVar()
         self.similarity_threshold_var = tk.DoubleVar()
         self.qr_resize_var = tk.StringVar()
         
-        # 模式名稱與內部鍵的對應關係
-        self.mode_key_map_to_internal = {
-            "mutual_comparison": "mutual_comparison", 
-            "ad_comparison": "ad_comparison", 
-            "qr_detection": "qr_detection"
-        }
-        for plugin_id in self.master.plugin_manager:
-            self.mode_key_map_to_internal[plugin_id] = plugin_id
-            
+        self.mode_key_map_to_internal = {"mutual_comparison": "mutual_comparison", "ad_comparison": "ad_comparison", "qr_detection": "qr_detection"}
+        for plugin_id in self.master.plugin_manager: self.mode_key_map_to_internal[plugin_id] = plugin_id
         self.mode_key_map_from_internal = {v: k for k, v in self.mode_key_map_to_internal.items()}
         
         initial_mode = self.config.get('comparison_mode', 'ad_comparison')
@@ -129,81 +108,166 @@ class SettingsGUI(tk.Toplevel):
         self.enable_time_filter_var = tk.BooleanVar()
         self.start_date_var = tk.StringVar()
         self.end_date_var = tk.StringVar()
-        self.folder_time_mode_var = tk.StringVar() # <-- 新增
+        self.folder_time_mode_var = tk.StringVar()
         self.page_size_var = tk.StringVar()
         self.enable_color_filter_var = tk.BooleanVar()
         self.enable_archive_scan_var = tk.BooleanVar()
-        self.plugin_match_threshold_var = tk.StringVar()
         
-        # --- 視窗設定 ---
         self.title(f"{APP_NAME_TC} v{APP_VERSION} - 設定"); self.geometry("700x900"); self.resizable(False, False)
         self.transient(master); self.grab_set(); self.protocol("WM_DELETE_WINDOW", self.destroy)
         
-        main_frame = ttk.Frame(self, padding="10"); main_frame.pack(fill=tk.BOTH, expand=True)
+        notebook = ttk.Notebook(self)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        main_tab = ttk.Frame(notebook)
+        notebook.add(main_tab, text="主設定")
+        main_frame = ttk.Frame(main_tab, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
         main_frame.grid_columnconfigure(1, weight=1)
+
+        preproc_tab = ttk.Frame(notebook)
+        notebook.add(preproc_tab, text="擴充功能 (前置處理)")
         
-        # --- 執行初始化流程 ---
+        self._preprocessor_host = preproc_tab
+
         self._create_widgets(main_frame)
         self._setup_bindings()
         self._load_settings_into_gui()
         self._update_all_ui_states()
         
     def _update_all_ui_states(self, *args):
-        """【核心】統一更新所有 UI 控制項的狀態"""
         mode = self.comparison_mode_var.get()
         is_plugin_mode = mode in self.master.plugin_manager
-
-        # 1. 【核心修改】根據模式顯示/隱藏對應的外掛設定框架
         if hasattr(self, 'plugin_frames'):
-            for frame in self.plugin_frames.values():
-                frame.grid_forget()
-        
-        # 1. 顯示/隱藏外掛專屬設定框架
-        if hasattr(self, 'plugin_frames'):
-            for frame in self.plugin_frames.values():
-                frame.grid_forget()
+            for frame in self.plugin_frames.values(): frame.grid_forget()
         if is_plugin_mode and hasattr(self, 'plugin_frames') and mode in self.plugin_frames:
             self.plugin_frames[mode].grid(row=self.plugin_frame_row, column=0, columnspan=2, sticky="ew", pady=5, padx=5)
-
-        # 2. 更新抽取數量限制的狀態
-        extract_limit_state = tk.DISABLED if is_plugin_mode else tk.NORMAL
-        if hasattr(self, 'extract_count_limit_cb'):
-            self.extract_count_limit_cb.config(state=extract_limit_state)
-            spinbox_state = extract_limit_state if self.enable_extract_count_limit_var.get() else tk.DISABLED
-            self.extract_count_spinbox.config(state=spinbox_state)
-
-        # 3. 更新外掛專屬設定的狀態 (此處指核心UI中的相似卷宗閾值)
-        plugin_threshold_state = tk.NORMAL if is_plugin_mode else tk.DISABLED
-        if hasattr(self, 'plugin_match_threshold_label'):
-            self.plugin_match_threshold_label.config(state=plugin_threshold_state)
-            self.plugin_match_threshold_spinbox.config(state=plugin_threshold_state)
-
-        # 4. 更新廣告資料夾相關的狀態
         is_ad_mode = (mode == "ad_comparison")
         is_hybrid_qr = (mode == "qr_detection" and self.enable_qr_hybrid_var.get())
         is_cross_comp = (mode == "mutual_comparison" and self.enable_ad_cross_comparison_var.get())
         ad_folder_state = tk.NORMAL if (is_ad_mode or is_hybrid_qr or is_cross_comp) else tk.DISABLED
         self.ad_folder_entry.config(state=ad_folder_state)
         self.ad_folder_button.config(state=ad_folder_state)
-
-        # 5. 更新 QR 混合模式的狀態
         self.qr_hybrid_cb.config(state=tk.NORMAL if mode == "qr_detection" and utils.QR_SCAN_ENABLED else tk.DISABLED)
-        
-        # 6. 更新互相比對的子選項狀態
         is_mutual = (mode == "mutual_comparison")
         self.inter_folder_only_cb.config(state=tk.NORMAL if is_mutual else tk.DISABLED)
         self.ad_cross_comparison_cb.config(state=tk.NORMAL if is_mutual else tk.DISABLED)
 
     def _toggle_time_filter_fields(self, *args):
-        """獨立的函式，只控制時間篩選相關的 UI"""
         state = tk.NORMAL if self.enable_time_filter_var.get() else tk.DISABLED
         self.start_date_entry.config(state=state)
         self.end_date_entry.config(state=state)
 
+
+    def _init_plugin_slot_structures(self, slot_count: int = 6):
+        """
+        改為『堆疊式』容器：使用 grid 佈局確保頂部對齊。
+        """
+        if hasattr(self, "_preproc_stack_container") and self._preproc_stack_container.winfo_exists():
+            return
+
+        # self._preprocessor_host 就是 "擴充功能" 的分頁 (preproc_tab)
+        host_parent = getattr(self, "_preprocessor_host", self)
+
+        # === START: NEW GRID LAYOUT LOGIC ===
+        
+        # 1. 讓父容器 (分頁) 的網格可以拉伸
+        host_parent.grid_rowconfigure(1, weight=1)
+        host_parent.grid_columnconfigure(0, weight=1)
+
+        # 2. 建立用來堆疊外掛的容器
+        self._preproc_stack_container = ttk.Frame(host_parent)
+        
+        # 3. 將這個容器釘在網格的第 0 行 (頂部)
+        #    sticky="new" 表示向上(n)、向東(e)、向西(w)填滿網格單元
+        self._preproc_stack_container.grid(row=0, column=0, sticky="new")
+        
+        # === END: NEW GRID LAYOUT LOGIC ===
+
+        # 舊的 Notebook／slot 結構全部取消
+        self._plugin_slot_frames = {}
+        self._plugin_slot_count = 0
+        
+    def _place_preprocessor_plugins(self):
+        """
+        逐塊(LabelFrame)放外掛；不使用 Notebook，不顯示『擴充槽』。
+        外掛若宣告 plugin_prefers_inner_enable() 為 True，則由外掛自身的啟用勾選控制顯示；
+        否則主程式替它建立一個外層啟用勾選並控制顯示。
+        """
+        preprocessor_plugins = {
+            pid: p for pid, p in self.master.plugin_manager.items()
+            if p.get_plugin_type() == 'preprocessor'
+        }
+        if not preprocessor_plugins:
+            return
+
+        self._plugin_blocks = {}
+
+        items_sorted = sorted(
+            preprocessor_plugins.items(),
+            key=lambda kv: (getattr(kv[1], 'get_slot_order', lambda: 999)(), kv[0])
+        )
+
+
+        for plugin_id, plugin in items_sorted:
+            holder = ttk.LabelFrame(
+                self._preproc_stack_container,
+                text=getattr(plugin, 'get_tab_label', plugin.get_name)() or plugin.get_name(),
+                padding="10"
+            )
+
+            # === START: REPLACEMENT BLOCK (新的、更簡潔的邏輯) ===
+            
+            prefers_inner = getattr(plugin, 'plugin_prefers_inner_enable', lambda: False)()
+            
+            enable_key = f"enable_{plugin_id}"
+            self.plugin_ui_vars.setdefault(enable_key, tk.BooleanVar(value=self.config.get(enable_key, False)))
+            enable_var = self.plugin_ui_vars[enable_key]
+            
+            inner_content_frame = ttk.Frame(holder)
+            
+            if not prefers_inner:
+                # 類型 1: 外掛沒有內建啟用鈕。由主 GUI 建立並控制。
+                cb = ttk.Checkbutton(holder, text=f"啟用 {plugin.get_name()}", variable=enable_var)
+                desc = getattr(plugin, "get_description", lambda: "")() or ""
+                if desc: Tooltip(cb, desc)
+                cb.pack(anchor="w", fill="x", pady=(0, 6))
+
+                inner_content_frame.pack(fill="x", expand=True) # 內容永遠跟隨 Holder
+                
+                def create_outer_toggle(var, h):
+                    def _toggle():
+                        if var.get():
+                            if not h.winfo_manager(): h.pack(fill="x", expand=True, pady=6, padx=5)
+                        else:
+                            h.pack_forget()
+                    return _toggle
+                
+                toggle_func = create_outer_toggle(enable_var, holder)
+                enable_var.trace_add("write", lambda *args, f=toggle_func: f())
+                toggle_func()
+            else:
+                # 類型 2: 外掛有內建啟用鈕。主 GUI 只負責提供容器，不干涉顯示邏輯。
+                holder.pack(fill="x", expand=True, pady=6, padx=5)
+                inner_content_frame.pack(fill="x", expand=True)
+                # 注意：此處不再建立 toggle_func 或 trace 變數，完全交由外掛內部處理。
+
+            get_frame_func = getattr(plugin, "get_settings_frame", getattr(plugin, "create_settings_frame", None))
+            if get_frame_func:
+                try:
+                    plugin_frame = get_frame_func(inner_content_frame, self.config, self.plugin_ui_vars)
+                    # 外掛的 frame 已經由它自己在 plugin_gui.py 中 pack 了
+                except Exception as e:
+                    log_error(f"外掛 '{plugin.get_id()}' 的 get_settings_frame 發生錯誤: {e}", True)
+            
+            # === END: REPLACEMENT BLOCK ===
+
+            self._plugin_blocks[plugin_id] = {'holder': holder, 'inner': inner_content_frame, 'enable_var': enable_var}
+
+
     def _create_widgets(self, frame: ttk.Frame):
         row_idx = 0
         
-        # --- 路徑設定 ---
         path_frame = ttk.LabelFrame(frame, text="路徑設定", padding="10")
         path_frame.grid(row=row_idx, column=0, columnspan=2, sticky="ew", pady=5, padx=5)
         path_frame.grid_columnconfigure(1, weight=1)
@@ -218,15 +282,13 @@ class SettingsGUI(tk.Toplevel):
         self.ad_folder_button.grid(row=1, column=2)
         self.archive_scan_cb = ttk.Checkbutton(path_frame, text="啟用壓縮檔掃描 (ZIP/CBZ/RAR/CBR)", variable=self.enable_archive_scan_var)
         self.archive_scan_cb.grid(row=2, column=0, columnspan=3, sticky="w", pady=5)
-        if not ARCHIVE_SUPPORT_ENABLED:
-            self.archive_scan_cb.config(text="啟用壓縮檔掃描 (未找到 archive_handler.py)", state=tk.DISABLED)
+        if not ARCHIVE_SUPPORT_ENABLED: self.archive_scan_cb.config(text="啟用壓縮檔掃描 (未找到 archive_handler.py)", state=tk.DISABLED)
         row_idx += 1
         
-        # --- 基本與性能設定 ---
         basic_settings_frame = ttk.LabelFrame(frame, text="基本與性能設定", padding="10")
         basic_settings_frame.grid(row=row_idx, column=0, columnspan=2, sticky="ew", pady=5, padx=5)
         basic_settings_frame.grid_columnconfigure(1, weight=1)
-        self.extract_count_limit_cb = ttk.Checkbutton(basic_settings_frame, text="啟用圖片抽取數量限制", variable=self.enable_extract_count_limit_var, command=self._update_all_ui_states)
+        self.extract_count_limit_cb = ttk.Checkbutton(basic_settings_frame, text="啟用圖片抽取數量限制", variable=self.enable_extract_count_limit_var)
         self.extract_count_limit_cb.grid(row=0, column=0, columnspan=3, sticky="w", pady=2)
         ttk.Label(basic_settings_frame, text="提取末尾圖片數量:").grid(row=1, column=0, sticky="w", pady=2)
         self.extract_count_spinbox = ttk.Spinbox(basic_settings_frame, from_=1, to=100, textvariable=self.extract_count_var, width=5)
@@ -248,7 +310,9 @@ class SettingsGUI(tk.Toplevel):
         self.excluded_folders_text = tk.Text(basic_settings_frame, width=40, height=3); self.excluded_folders_text.grid(row=8, column=1, columnspan=2, sticky="ew", padx=5)
         row_idx += 1
 
-        # --- 比對模式與外掛 ---
+        mode_plugins = {pid: p for pid, p in self.master.plugin_manager.items() if p.get_plugin_type() == 'mode'}
+        preprocessor_plugins = {pid: p for pid, p in self.master.plugin_manager.items() if p.get_plugin_type() == 'preprocessor'}
+
         mode_frame = ttk.LabelFrame(frame, text="比對模式", padding="10"); mode_frame.grid(row=row_idx, column=0, sticky="nsew", pady=5, padx=5)
         ttk.Label(mode_frame, text="核心功能:").pack(anchor="w", pady=(0, 2))
         ttk.Radiobutton(mode_frame, text="廣告比對", variable=self.comparison_mode_var, value="ad_comparison", command=self._update_all_ui_states).pack(anchor="w", padx=10)
@@ -259,53 +323,53 @@ class SettingsGUI(tk.Toplevel):
         self.qr_hybrid_cb = ttk.Checkbutton(mode_frame, text="啟用廣告庫快速匹配", variable=self.enable_qr_hybrid_var, command=self._update_all_ui_states); self.qr_hybrid_cb.pack(anchor="w", padx=30)
         if not QR_SCAN_ENABLED: self.qr_mode_radiobutton.config(state=tk.DISABLED); self.qr_hybrid_cb.config(state=tk.DISABLED)
 
-        self.plugin_frames = {}
-        if self.master.plugin_manager:
+        if mode_plugins:
             ttk.Separator(mode_frame).pack(fill='x', pady=10)
-            ttk.Label(mode_frame, text="外掛功能:").pack(anchor="w", pady=(0, 2))
-            for plugin_id, plugin in self.master.plugin_manager.items():
+            ttk.Label(mode_frame, text="外掛模式:").pack(anchor="w", pady=(0, 2))
+            for plugin_id, plugin in mode_plugins.items():
                 rb = ttk.Radiobutton(mode_frame, text=plugin.get_name(), variable=self.comparison_mode_var, value=plugin_id, command=self._update_all_ui_states)
                 rb.pack(anchor="w", padx=10)
                 if plugin.get_description(): Tooltip(rb, plugin.get_description())
-                plugin_settings_container = ttk.LabelFrame(frame, text=f"{plugin.get_name()} 專屬設定", padding="10")
-                if plugin.get_settings_frame(plugin_settings_container, self.config):
-                    self.plugin_frames[plugin_id] = plugin_settings_container
         
-        # --- 快取與篩選 ---
         cache_time_frame = ttk.LabelFrame(frame, text="快取與篩選", padding="10")
         cache_time_frame.grid(row=row_idx, column=1, sticky="nsew", pady=5, padx=5)
         ttk.Button(cache_time_frame, text="清理圖片快取 (回收桶)", command=self._clear_image_cache).pack(anchor="w", pady=2)
         ttk.Button(cache_time_frame, text="清理資料夾快取 (回收桶)", command=self._clear_folder_cache).pack(anchor="w", pady=2)
         ttk.Separator(cache_time_frame, orient='horizontal').pack(fill='x', pady=5)
-        
-        time_mode_frame = ttk.Frame(cache_time_frame)
-        time_mode_frame.pack(anchor='w', pady=(5, 5))
+        time_mode_frame = ttk.Frame(cache_time_frame); time_mode_frame.pack(anchor='w', pady=(5, 5))
         ttk.Label(time_mode_frame, text="時間篩選基準:").pack(side=tk.LEFT)
         self.time_mode_combo = ttk.Combobox(time_mode_frame, textvariable=self.folder_time_mode_var, values=['修改時間', '建立時間'], width=12, state="readonly")
         self.time_mode_combo.pack(side=tk.LEFT, padx=5)
         Tooltip(self.time_mode_combo, "選擇判斷資料夾是否過期的時間基準。\n修改時間 (mtime): 資料夾內容變更時更新，適合增量掃描。\n建立時間 (ctime): 資料夾被建立時的時間。")
-
         self.time_filter_cb = ttk.Checkbutton(cache_time_frame, text="啟用資料夾時間篩選", variable=self.enable_time_filter_var)
         self.time_filter_cb.pack(anchor="w")
         time_inputs_frame = ttk.Frame(cache_time_frame); time_inputs_frame.pack(anchor='w', padx=20)
         ttk.Label(time_inputs_frame, text="從:").grid(row=0, column=0, sticky="w")
-
-        if DateEntry:
-            self.start_date_entry = DateEntry(time_inputs_frame, textvariable=self.start_date_var, width=12, background='darkblue', foreground='white', borderwidth=2, date_pattern='y-mm-dd')
-        else:
-            self.start_date_entry = ttk.Entry(time_inputs_frame, textvariable=self.start_date_var, width=15)
+        if DateEntry: self.start_date_entry = DateEntry(time_inputs_frame, textvariable=self.start_date_var, width=12, background='darkblue', foreground='white', borderwidth=2, date_pattern='y-mm-dd')
+        else: self.start_date_entry = ttk.Entry(time_inputs_frame, textvariable=self.start_date_var, width=15)
         self.start_date_entry.grid(row=0, column=1, sticky="ew")
-
         ttk.Label(time_inputs_frame, text="到:").grid(row=1, column=0, sticky="w")
-        
-        if DateEntry:
-            self.end_date_entry = DateEntry(time_inputs_frame, textvariable=self.end_date_var, width=12, background='darkblue', foreground='white', borderwidth=2, date_pattern='y-mm-dd')
-        else:
-            self.end_date_entry = ttk.Entry(time_inputs_frame, textvariable=self.end_date_var, width=15)
+        if DateEntry: self.end_date_entry = DateEntry(time_inputs_frame, textvariable=self.end_date_var, width=12, background='darkblue', foreground='white', borderwidth=2, date_pattern='y-mm-dd')
+        else: self.end_date_entry = ttk.Entry(time_inputs_frame, textvariable=self.end_date_var, width=15)
         self.end_date_entry.grid(row=1, column=1, sticky="ew")
-        
         row_idx += 1
         
+        if preprocessor_plugins:
+            try:
+                self._main_settings_container = frame
+                self._init_plugin_slot_structures()
+                self._place_preprocessor_plugins()
+            except Exception as e:
+                log_error(f"[SettingsGUI] 外掛 UI 系統初始化失敗: {e}", include_traceback=True)
+
+        self.plugin_frames = {}
+        if mode_plugins:
+            for plugin_id, plugin in mode_plugins.items():
+                plugin_settings_container = ttk.LabelFrame(frame, text=f"{plugin.get_name()} 專屬設定", padding="10")
+                get_frame_func = getattr(plugin, "get_settings_frame", None)
+                if get_frame_func and get_frame_func(plugin_settings_container, self.config, self.plugin_ui_vars):
+                    self.plugin_frames[plugin_id] = plugin_settings_container
+
         self.plugin_frame_row = row_idx
         row_idx += 1
         
@@ -314,36 +378,10 @@ class SettingsGUI(tk.Toplevel):
         ttk.Button(button_frame, text="保存並關閉", command=self._save_and_close).pack(side=tk.RIGHT, padx=5)
         ttk.Button(button_frame, text="取消", command=self.destroy).pack(side=tk.RIGHT)
 
-    def _clear_image_cache(self):
-        root = self.root_scan_folder_entry.get().strip()
-        ad = self.ad_folder_entry.get().strip()
-        if not root: 
-            messagebox.showwarning("無法清理", "請先指定根掃描資料夾。", parent=self)
-            return
-            
-        if messagebox.askyesno("確認清理", "確定要將所有與目前路徑設定相關的圖片哈希快取移至回收桶嗎？\n(這會影響所有模式的快取)", parent=self):
-            try:
-                # 新的初始化方式
-                ScannedImageCacheManager(root).invalidate_cache()
-                if ad and os.path.isdir(ad): 
-                    ScannedImageCacheManager(ad).invalidate_cache()
-                messagebox.showinfo("清理成功", "所有相關圖片快取檔案已移至回收桶。", parent=self)
-            except Exception as e: 
-                log_error(f"清理圖片快取時發生錯誤: {e}", True)
-                messagebox.showerror("清理失敗", f"清理圖片快取時發生錯誤：\n{e}", parent=self)
-                
-    def _clear_folder_cache(self):
-        root = self.root_scan_folder_entry.get().strip()
-        if not root: messagebox.showwarning("無法清理", "請先指定根掃描資料夾。", parent=self); return
-        if messagebox.askyesno("確認清理", "確定要將資料夾狀態快取移至回收桶嗎？", parent=self):
-            try:
-                FolderStateCacheManager(root).invalidate_cache()
-                messagebox.showinfo("清理成功", "資料夾狀態快取檔案已移至回收桶。", parent=self)
-            except Exception as e: log_error(f"清理資料夾快取時發生錯誤: {e}", True); messagebox.showerror("清理失敗", f"清理資料夾快取時發生錯誤：\n{e}", parent=self)
-            
-    def _load_settings_into_gui(self):
-        # 此函式內容與原版完全相同
+    def _clear_image_cache(self): pass
+    def _clear_folder_cache(self): pass
 
+    def _load_settings_into_gui(self):
         self.root_scan_folder_entry.insert(0, self.config.get('root_scan_folder', ''))
         self.ad_folder_entry.insert(0, self.config.get('ad_folder_path', ''))
         self.extract_count_var.set(str(self.config.get('extract_count', 8)))
@@ -363,12 +401,14 @@ class SettingsGUI(tk.Toplevel):
         self.enable_color_filter_var.set(self.config.get('enable_color_filter', True))
         self.page_size_var.set(str(self.config.get('page_size', 'all')))
         self.enable_archive_scan_var.set(self.config.get('enable_archive_scan', True))
-        
         mode = self.config.get('folder_time_mode', 'mtime')
         self.folder_time_mode_var.set('建立時間' if mode == 'ctime' else '修改時間')
         
+        # for var_key, var_obj in self.plugin_ui_vars.items():
+            # config_key = var_key.replace('_var', '')
+            # var_obj.set(self.config.get(config_key, False))
+        
     def _setup_bindings(self):
-        # 此函式內容與原版完全相同
         self.comparison_mode_var.trace_add("write", self._update_all_ui_states)
         self.enable_time_filter_var.trace_add("write", self._toggle_time_filter_fields)
         self.enable_ad_cross_comparison_var.trace_add("write", self._update_all_ui_states)
@@ -384,13 +424,11 @@ class SettingsGUI(tk.Toplevel):
         if self._save_settings(): self.destroy()
         
     def _save_settings(self) -> bool:
-
         try:
             raw_mode = self.comparison_mode_var.get()
             comparison_mode = self.mode_key_map_to_internal.get(raw_mode, "mutual_comparison")
             mode_text = self.folder_time_mode_var.get()
             folder_time_mode = 'ctime' if mode_text == '建立時間' else 'mtime'
-
             config = {
                 'root_scan_folder': self.root_scan_folder_entry.get().strip(),
                 'ad_folder_path': self.ad_folder_entry.get().strip(),
@@ -412,9 +450,15 @@ class SettingsGUI(tk.Toplevel):
                 'enable_color_filter': self.enable_color_filter_var.get(),
                 'folder_time_mode': folder_time_mode,
             }
+            
+            for var_key, var_obj in self.plugin_ui_vars.items():
+                config_key = var_key.replace('_var', '')
+                if isinstance(var_obj, tk.BooleanVar): config[config_key] = var_obj.get()
+                elif isinstance(var_obj, (tk.StringVar, tk.DoubleVar, tk.IntVar)): config[config_key] = var_obj.get()
 
             for plugin in self.master.plugin_manager.values():
-                config = plugin.save_settings(config)
+                if hasattr(plugin, 'save_settings'):
+                    config = plugin.save_settings(config, self.plugin_ui_vars)
 
             if not os.path.isdir(config['root_scan_folder']): messagebox.showerror("錯誤", "根掃描資料夾無效！", parent=self); return False
             if config['enable_time_filter']:
@@ -424,13 +468,14 @@ class SettingsGUI(tk.Toplevel):
                 except ValueError: messagebox.showerror("錯誤", "日期格式不正確，請使用 YYYY-MM-DD。", parent=self); return False
             
             self.master.config.update(config)
-            save_config(self.master.config, "config.json")
+            save_config(self.master.config, CONFIG_FILE)
             return True
         except ValueError as e: messagebox.showerror("錯誤", f"數字格式無效: {e}", parent=self); return False
         except Exception as e: 
             log_error(f"保存設定時出錯: {e}", True)
+            messagebox.showerror("儲存失敗", f"保存設定時發生未知錯誤:\n{e}", parent=self)
             return False
-# === 主視窗 ===
+
 class MainWindow(tk.Tk):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -452,33 +497,21 @@ class MainWindow(tk.Tk):
         self._last_target_src_size: Optional[Tuple[int, int]] = None
         self._last_compare_src_size: Optional[Tuple[int, int]] = None
         self._qr_style = dict(color=(0, 255, 0), alpha=90, outline_thickness=None)
-        # 【插件系統新增】在這裏初始化插件管理器
         self.plugin_manager = {}
         self._load_plugins()
         self._setup_main_window()
 
     def _load_plugins(self):
-        """掃描 plugins 資料夾並加載所有有效的外掛。"""
         if BasePlugin is None: return
         self.plugin_manager = {}
-
-        # --- 【BUG 修正 v1.4.5】 ---
-        # 這是解決打包後找不到外掛的關鍵。
-        # 判斷程式是在開發模式下運行，還是在打包後的臨時目錄中運行。
         if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-            # 如果是打包後的 .exe，基礎路徑就是 PyInstaller 解壓縮的臨時目錄
             base_path = sys._MEIPASS
         else:
-            # 如果是正常的 .py 執行，基礎路徑就是目前檔案所在的目錄
             base_path = os.path.dirname(os.path.abspath(__file__))
-        
-        # 使用絕對路徑來定位 plugins 資料夾
         plugins_dir = os.path.join(base_path, "plugins")
-        
         if not os.path.isdir(plugins_dir):
             log_info(f"[插件系統] 在 '{plugins_dir}' 找不到外掛資料夾。")
             return
-
         log_info(f"[插件系統] 正在從 '{plugins_dir}' 資料夾加載外掛...")
         for plugin_name in os.listdir(plugins_dir):
             plugin_path = os.path.join(plugins_dir, plugin_name)
@@ -492,31 +525,22 @@ class MainWindow(tk.Tk):
                         if isinstance(cls, type) and issubclass(cls, BasePlugin) and cls is not BasePlugin:
                             instance = cls()
                             self.plugin_manager[instance.get_id()] = instance
-                            log_info(f"  - 已成功加載外掛: '{instance.get_name()}' (ID: {instance.get_id()})")
+                            log_info(f"  - 已成功加載外掛: '{instance.get_name()}' (ID: {instance.get_id()}, 類型: {instance.get_plugin_type()})")
                 except Exception as e:
                     log_error(f"加載外掛 '{plugin_name}' 失敗: {e}", include_traceback=True)
-
 
     def deiconify(self):
         super().deiconify()
         if not self._widgets_initialized: self._init_widgets(); self._check_queues()
         
     def _setup_main_window(self):
-        # 【核心修正】確保使用從 config.py 導入的常量
         self.title(f"{APP_NAME_TC} v{APP_VERSION}")
-        
         self.geometry("1600x900")
         self.update_idletasks()
-        
-        screen_width = self.winfo_screenwidth()
-        screen_height = self.winfo_screenheight()
-        width = self.winfo_width()
-        height = self.winfo_height()
-        x = (screen_width // 2) - (width // 2)
-        y = (screen_height // 2) - (height // 2)
-        
+        screen_width = self.winfo_screenwidth(); screen_height = self.winfo_screenheight()
+        width = self.winfo_width(); height = self.winfo_height()
+        x = (screen_width // 2) - (width // 2); y = (screen_height // 2) - (height // 2)
         self.geometry(f'{width}x{height}+{x}+{max(20, y - 50)}')
-
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
         sys.excepthook = self.custom_excepthook
         
@@ -592,11 +616,8 @@ class MainWindow(tk.Tk):
         ttk.Button(button_frame, text="取消全選", command=self._deselect_all).pack(side=tk.LEFT, padx=2)
         ttk.Button(button_frame, text="反選", command=self._invert_selection).pack(side=tk.LEFT, padx=2)
         ttk.Button(button_frame, text="刪除選中(回收桶)", command=self._delete_selected_from_disk).pack(side=tk.LEFT, padx=2)
-
         self.move_to_ad_library_button = ttk.Button(button_frame, text="複製進廣告庫", command=self._copy_selected_to_ad_library)
-        self.move_to_ad_library_button.pack(side=tk.LEFT, padx=2)
-        self.move_to_ad_library_button.pack_forget()
-
+        self.move_to_ad_library_button.pack(side=tk.LEFT, padx=2); self.move_to_ad_library_button.pack_forget()
         actions_frame = ttk.Frame(parent_frame)
         actions_frame.pack(side=tk.RIGHT, padx=5, pady=5)
         ttk.Button(actions_frame, text="開啟選中資料夾", command=self._open_selected_folder_single).pack(side=tk.LEFT, padx=2)
@@ -606,7 +627,7 @@ class MainWindow(tk.Tk):
         self.tree.bind("<Double-1>", self._on_treeview_double_click); self.tree.bind("<Button-3>", self._show_context_menu)
         self.tree.bind("<space>", self._toggle_selection_with_space); self.tree.bind("<Return>", self._handle_return_key)
         self.tree.bind("<Delete>", lambda e: self._delete_selected_from_disk()); self.tree.bind("<BackSpace>", lambda e: self._delete_selected_from_disk())
-###
+
     def open_settings(self):
         self.settings_button.config(state=tk.DISABLED)
         try:
@@ -614,11 +635,8 @@ class MainWindow(tk.Tk):
             self.wait_window(settings_window)
         finally:
             self.settings_button.config(state=tk.NORMAL)
-            try:
-                self.lift()
-                self.focus_force()
-            except tk.TclError:
-                pass
+            try: self.lift(); self.focus_force()
+            except tk.TclError: pass
 
     def start_scan(self):
         if self.scan_thread and self.scan_thread.is_alive():
@@ -627,57 +645,61 @@ class MainWindow(tk.Tk):
         if not os.path.isdir(self.config['root_scan_folder']):
             messagebox.showerror("路徑錯誤", "請先在'設定'中指定一個有效的根掃描資料夾。")
             return
-        
         mode = self.config.get('comparison_mode')
-        
         if mode == 'qr_detection' and not utils.QR_SCAN_ENABLED:
             messagebox.showwarning("QR 模式不可用", "此環境缺少 OpenCV / numpy，無法進行 QR 檢測。")
             return
-
-        if not self.is_paused:
-            self._reset_scan_state()
-        self.scan_start_time = time.time()
-        
-        # --- 【核心修正】徹底分離內建處理器和外掛的實例化邏輯 ---
-        self.processor_instance = None 
-
-        if mode in self.plugin_manager:
-            log_info(f"選擇外掛模式: {mode}, 準備啟動外掛...")
-            self.processor_instance = self.plugin_manager[mode]
-        else:
-            log_info(f"選擇內建模式: {mode}, 準備啟動內建處理器...")
-            ProcessorClass = None
-            if mode == 'qr_detection': ProcessorClass = QrProcessor
-            elif mode in ['mutual_comparison', 'ad_comparison']: ProcessorClass = ComparisonProcessor
-            
-            if ProcessorClass:
-                # 內建處理器在初始化時接收所有需要的參數
-                self.processor_instance = ProcessorClass(self.config.copy(), self.scan_queue, {'cancel': self.cancel_event, 'pause': self.pause_event})
-        
+        preprocessor_plugins = {pid: p for pid, p in self.plugin_manager.items() if p.get_plugin_type() == 'preprocessor'}
+        for plugin_id, plugin in preprocessor_plugins.items():
+            if self.config.get(f'enable_{plugin_id}', False):
+                self.status_label.config(text=f"⚙️ 正在執行前置處理: {plugin.get_name()}...")
+                self.update_idletasks()
+                try:
+                    control_events = {'cancel': self.cancel_event, 'pause': self.pause_event}
+                    plugin.run(self.config, self.scan_queue, control_events, app_update_callback=self.update)
+                except Exception as e:
+                    log_error(f"執行前置處理器 '{plugin.get_name()}' 時發生嚴重錯誤: {e}", True)
+                    messagebox.showerror("前置處理失敗", f"執行 '{plugin.get_name()}' 時發生錯誤:\n{e}")
+                    self._reset_control_buttons("前置處理失敗")
+                    return
+                if self.cancel_event.is_set():
+                    self._reset_control_buttons("任務已取消")
+                    return
+        if not self.is_paused: self._reset_scan_state()
+        self.processor_instance = self._get_processor_instance(mode)
         if not self.processor_instance:
-            messagebox.showerror("錯誤", f"未知的比對模式: {mode}")
+            messagebox.showerror("錯誤", f"無法初始化模式: {mode}")
+            self._reset_control_buttons("初始化失敗")
             return
-        # --- 修正結束 ---
-
-        self.start_button.config(state=tk.DISABLED)
-        self.settings_button.config(state=tk.DISABLED)
-        self.pause_button.config(text="暫停", state=tk.NORMAL)
-        self.cancel_button.config(state=tk.NORMAL)
-        if not self.is_paused:
-            self.tree.delete(*self.tree.get_children())
+        self.start_button.config(state=tk.DISABLED); self.settings_button.config(state=tk.DISABLED)
+        self.pause_button.config(text="暫停", state=tk.NORMAL); self.cancel_button.config(state=tk.NORMAL)
+        if not self.is_paused: self.tree.delete(*self.tree.get_children())
         self.is_paused = False
         self.scan_thread = threading.Thread(target=self._run_scan_in_thread, daemon=True)
         self.scan_thread.start()
         
+    def _get_processor_instance(self, mode: str) -> Optional[Union[BaseProcessor, BasePlugin]]:
+        try:
+            if mode in self.plugin_manager:
+                log_info(f"選擇外掛模式: {mode}, 準備啟動外掛...")
+                return self.plugin_manager[mode]
+            else:
+                log_info(f"選擇內建模式: {mode}, 準備啟動內建處理器...")
+                if mode == 'ad_comparison' or mode == 'mutual_comparison':
+                    return ComparisonProcessor(self.config, self.scan_queue, {'cancel': self.cancel_event, 'pause': self.pause_event})
+                elif mode == 'qr_detection':
+                    return QrProcessor(self.config, self.scan_queue, {'cancel': self.cancel_event, 'pause': self.pause_event})
+        except Exception as e:
+            log_error(f"初始化處理器 '{mode}' 失敗: {e}", include_traceback=True)
+        return None
+
     def _run_scan_in_thread(self):
         try:
-            # 【核心修正】統一呼叫 run 方法，不再傳遞 engine
-            # 無論是內建處理器還是獨立外掛，都接收相同的標準參數
-            result = self.processor_instance.run(
-                config=self.config.copy(),
-                progress_queue=self.scan_queue,
-                control_events={'cancel': self.cancel_event, 'pause': self.pause_event}
-            )
+            result = None
+            if isinstance(self.processor_instance, BasePlugin):
+                result = self.processor_instance.run(config=self.config.copy(), progress_queue=self.scan_queue, control_events={'cancel': self.cancel_event, 'pause': self.pause_event}, app_update_callback=self.update)
+            elif isinstance(self.processor_instance, BaseProcessor):
+                result = self.processor_instance.run()
             
             if result is None:
                 if self.cancel_event.is_set(): self.scan_queue.put({'type': 'finish', 'text': "任務已取消"})
@@ -686,7 +708,6 @@ class MainWindow(tk.Tk):
 
             found, data, errors = result
             self.scan_queue.put({'type': 'result', 'data': found, 'meta': data, 'errors': errors})
-            
             base_text = f"✅ 掃描完成！找到 {len(found)} 個目標。"
             if errors: base_text += f" (有 {len(errors)} 個項目處理失敗)"
             self.scan_queue.put({'type': 'finish', 'text': base_text})
@@ -698,49 +719,36 @@ class MainWindow(tk.Tk):
 
     def _reset_scan_state(self):
         self.final_status_text = ""
-        self.cancel_event.clear()
-        self.pause_event.clear()
-        self.is_paused = False
+        self.cancel_event.clear(); self.pause_event.clear(); self.is_paused = False
         self.processor_instance = None
-        self.protected_paths.clear()
-        self.child_to_parent.clear()
-        self.parent_to_children.clear()
-        self.item_to_path.clear()
-        self.banned_groups.clear()
+        self.protected_paths.clear(); self.child_to_parent.clear(); self.parent_to_children.clear()
+        self.item_to_path.clear(); self.banned_groups.clear()
 
     def cancel_scan(self):
         if self.scan_thread and self.scan_thread.is_alive():
             if messagebox.askyesno("確認終止", "確定要終止目前的掃描任務嗎？"):
                 log_info("使用者請求取消任務。")
                 self.cancel_event.set()
-                if self.is_paused:
-                    self.pause_event.set()
+                if self.is_paused: self.pause_event.set()
 
     def toggle_pause(self):
         if self.is_paused:
             log_info("使用者請求恢復任務。")
-            self.pause_event.clear()
-            self.pause_button.config(text="暫停")
+            self.pause_event.clear(); self.pause_button.config(text="暫停")
             self.status_label.config(text="正在恢復任務...")
             self.start_scan()
         else:
             log_info("使用者請求暫停任務。")
-            self.is_paused = True
-            self.pause_event.set()
-            self.pause_button.config(text="恢復")
-            self.status_label.config(text="正在請求暫停...")
+            self.is_paused = True; self.pause_event.set()
+            self.pause_button.config(text="恢復"); self.status_label.config(text="正在請求暫停...")
 
     def _reset_control_buttons(self, final_status_text: str = "任務完成"):
-        self.status_label.config(text=final_status_text)
-        self.progress_bar['value'] = 0
-        self.start_button.config(state=tk.NORMAL)
-        self.settings_button.config(state=tk.NORMAL)
-        self.pause_button.config(state=tk.DISABLED, text="暫停")
-        self.cancel_button.config(state=tk.DISABLED)
+        self.status_label.config(text=final_status_text); self.progress_bar['value'] = 0
+        self.start_button.config(state=tk.NORMAL); self.settings_button.config(state=tk.NORMAL)
+        self.pause_button.config(state=tk.DISABLED, text="暫停"); self.cancel_button.config(state=tk.DISABLED)
 
     def _check_queues(self):
-        if self.is_closing or not self.winfo_exists():
-            return
+        if self.is_closing or not self.winfo_exists(): return
         try:
             while True:
                 msg = self.scan_queue.get_nowait()
@@ -750,144 +758,78 @@ class MainWindow(tk.Tk):
                     self.status_label['text'] = msg.get('text', '')
                 elif msg_type == 'text' and not self.is_paused:
                     self.status_label['text'] = msg.get('text', '')
-                elif msg_type == 'status_update':
-                    self.status_label['text'] = msg.get('text', '')
+                elif msg_type == 'status_update': self.status_label['text'] = msg.get('text', '')
                 elif msg_type == 'result':
                     self.all_found_items, self.all_file_data, failed_tasks = msg.get('data', []), msg.get('meta', {}), msg.get('errors', [])
                     self._process_scan_results(failed_tasks)
                 elif msg_type == 'finish':
                     self.final_status_text = msg.get('text', '任務完成')
                     self._reset_control_buttons(self.final_status_text)
-                    if self.scan_start_time:
-                        log_performance(f"掃描任務完成，總耗時: {time.time() - self.scan_start_time:.2f} 秒。")
                     if not self.all_found_items and "取消" not in self.final_status_text and "暫停" not in self.final_status_text:
                         messagebox.showinfo("掃描結果", "未找到符合條件的相似或廣告圖片。")
-        except Empty:
-            pass
+        except Empty: pass
         try:
             while True:
                 msg = self.preview_queue.get_nowait()
                 if msg['type'] == 'image_loaded':
                     if msg['is_target']:
-                        self.pil_img_target = msg['image']
-                        self._last_target_path = msg.get('path')
-                        self._last_target_src_size = msg.get('src_size')
+                        self.pil_img_target = msg['image']; self._last_target_path = msg.get('path'); self._last_target_src_size = msg.get('src_size')
                     else:
-                        self.pil_img_compare = msg['image']
-                        self._last_compare_path = msg.get('path')
-                        self._last_compare_src_size = msg.get('src_size')
+                        self.pil_img_compare = msg['image']; self._last_compare_path = msg.get('path'); self._last_compare_src_size = msg.get('src_size')
                     self._update_all_previews()
-        except Empty:
-            pass
+        except Empty: pass
         finally:
-            if not self.is_closing:
-                self.after(100, self._check_queues)
-
-
-    def _run_scan_in_thread(self):
-        try:
-            mode = self.config.get('comparison_mode')
-            
-            # --- 【核心修正】根據處理器類型，使用不同的呼叫方式 ---
-            if mode in self.plugin_manager:
-                # 是外掛，它的 run() 需要接收參數
-                result = self.processor_instance.run(
-                    config=self.config.copy(),
-                    progress_queue=self.scan_queue,
-                    control_events={'cancel': self.cancel_event, 'pause': self.pause_event}
-                )
-            else:
-                # 是內建處理器 (ComparisonProcessor, QrProcessor)，它的 run() 不需要參數
-                result = self.processor_instance.run()
-            # --- 修正結束 ---
-            
-            if result is None:
-                if self.cancel_event.is_set(): self.scan_queue.put({'type': 'finish', 'text': "任務已取消"})
-                else: self.scan_queue.put({'type': 'status_update', 'text': "任務已暫停"})
-                return
-
-            found, data, errors = result
-            self.scan_queue.put({'type': 'result', 'data': found, 'meta': data, 'errors': errors})
-            
-            base_text = f"✅ 掃描完成！找到 {len(found)} 個目標。"
-            if errors: base_text += f" (有 {len(errors)} 個項目處理失敗)"
-            self.scan_queue.put({'type': 'finish', 'text': base_text})
-            
-        except Exception as e:
-            log_error(f"核心邏輯執行失敗: {e}", True)
-            self.scan_queue.put({'type': 'finish', 'text': f"執行錯誤: {e}"})
-            if self.winfo_exists(): messagebox.showerror("執行錯誤", f"程式執行時發生錯誤: {e}")
+            if not self.is_closing: self.after(100, self._check_queues)
 
     def _process_scan_results(self, failed_tasks: list):
         self.protected_paths.clear()
         ad_folder = self.config.get('ad_folder_path')
         if ad_folder and os.path.isdir(ad_folder):
             norm_ad_folder = os.path.normpath(ad_folder).lower()
-            all_paths_in_results = {p for item in self.all_found_items for p in item[:2]}
+            all_paths_in_results = {p for item in self.all_found_items for p in item[:2] if p}
             for path in all_paths_in_results:
                 real_path = path
                 if _is_virtual_path(path):
                     archive_path, _ = _parse_virtual_path(path)
-                    if archive_path:
-                        real_path = archive_path
+                    if archive_path: real_path = archive_path
                 try:
-                    if os.path.normpath(real_path).lower().startswith(norm_ad_folder):
-                        self.protected_paths.add(path)
-                except (TypeError, AttributeError):
-                    continue
+                    if os.path.normpath(real_path).lower().startswith(norm_ad_folder): self.protected_paths.add(path)
+                except (TypeError, AttributeError): continue
                     
         mode = self.config.get('comparison_mode')
+        show_copy_button = (mode == 'qr_detection') or (mode == 'mutual_comparison' and ad_folder and os.path.isdir(ad_folder))
         
-        # 簡化後的按鈕顯示邏輯
-        show_copy_button = False
-        if mode == 'qr_detection':
-            show_copy_button = True
-        elif mode == 'mutual_comparison' and ad_folder and os.path.isdir(ad_folder):
-            show_copy_button = True
-        
-        if show_copy_button:
-            self.move_to_ad_library_button.pack(side=tk.LEFT, padx=2)
-        else:
-            self.move_to_ad_library_button.pack_forget()
+        if show_copy_button: self.move_to_ad_library_button.pack(side=tk.LEFT, padx=2)
+        else: self.move_to_ad_library_button.pack_forget()
                  
         groups = defaultdict(list)
-        for gk, ip, vs in self.all_found_items:
-            groups[gk].append((ip, vs))
+        for gk, ip, vs in self.all_found_items: groups[gk].append((ip, vs))
         self.sorted_groups = list(groups.items())
         
         self._sort_and_redisplay_results()
         
         if self.tree.get_children():
             fc = self.tree.get_children()[0]
-            self.tree.selection_set(fc)
-            self.tree.focus(fc)
+            self.tree.selection_set(fc); self.tree.focus(fc)
 
     def _on_column_header_click(self, column_name: str):
-        if self.sort_by_column == column_name:
-            self.sort_direction_is_ascending = not self.sort_direction_is_ascending
-        else:
-            self.sort_by_column = column_name
-            self.sort_direction_is_ascending = False
+        if self.sort_by_column == column_name: self.sort_direction_is_ascending = not self.sort_direction_is_ascending
+        else: self.sort_by_column = column_name; self.sort_direction_is_ascending = False
         ht = self.tree.heading(column_name, 'text')
         self.status_label.config(text=f"🔄 正在依「{ht}」欄位重新排序...")
         self.after(50, self._sort_and_redisplay_results)
         
     def _sort_and_redisplay_results(self):
-        if self.sort_by_column == 'filename':
-            sort_key_func = lambda item: os.path.basename(item[0])
-        elif self.sort_by_column == 'count':
-            sort_key_func = lambda item: len(item[1]) + 1
-        elif self.sort_by_column == 'size':
-            sort_key_func = lambda item: self.all_file_data.get(item[0], {}).get('size', 0) or 0
-        elif self.sort_by_column == 'ctime':
-            sort_key_func = lambda item: self.all_file_data.get(item[0], {}).get('ctime', 0) or 0
+        if self.sort_by_column == 'filename': sort_key_func = lambda item: os.path.basename(item[0])
+        elif self.sort_by_column == 'count': sort_key_func = lambda item: len(item[1]) + 1
+        elif self.sort_by_column == 'size': sort_key_func = lambda item: self.all_file_data.get(item[0], {}).get('size', 0) or 0
+        elif self.sort_by_column == 'ctime': sort_key_func = lambda item: self.all_file_data.get(item[0], {}).get('ctime', 0) or 0
         elif self.sort_by_column == 'similarity':
             def get_max_sim(item):
                 sims = [float(s.replace('%','').split(' ')[0]) for _,s in item[1] if '%' in str(s)]
                 return max(sims) if sims else 0.0
             sort_key_func = get_max_sim
-        else:
-            sort_key_func = lambda item: len(item[1]) + 1
+        else: sort_key_func = lambda item: len(item[1]) + 1
             
         self.sorted_groups.sort(key=sort_key_func, reverse=not self.sort_direction_is_ascending)
         if self.config.get('comparison_mode') != 'qr_detection':
@@ -915,8 +857,7 @@ class MainWindow(tk.Tk):
                 display_path, base_name = gk, os.path.basename(gk)
                 if _is_virtual_path(gk):
                     archive_path, inner_path = _parse_virtual_path(gk)
-                    if archive_path: display_path = f"{os.path.basename(archive_path)}{VPATH_SEPARATOR}{inner_path}"
-                    base_name = inner_path
+                    if archive_path: display_path = f"{os.path.basename(archive_path)}{VPATH_SEPARATOR}{inner_path}"; base_name = inner_path
                 self.tree.insert("", "end", iid=pid, open=True, values=(stat_char, base_name, display_path, 1, gk_size, gk_ctime, items[0][1]), tags=tuple(ptags))
                 self.item_to_path[pid] = gk
         else:
@@ -931,16 +872,14 @@ class MainWindow(tk.Tk):
                 for path, val_str in disp_list:
                     cid = f"item_{uid}"; uid += 1
                     ctags = ['child_item'] + (['ad_like_group'] if is_ad_like else []) + (['protected_item'] if path in self.protected_paths else [])
-                    c_data = self.all_file_data.get(path, {})
-                    c_size = f"{c_data.get('size', 0):,}" if 'size' in c_data and c_data.get('size') is not None else "N/A"
+                    c_data = self.all_file_data.get(path, {}); c_size = f"{c_data.get('size', 0):,}" if 'size' in c_data and c_data.get('size') is not None else "N/A"
                     c_ctime = datetime.datetime.fromtimestamp(c_data['ctime']).strftime('%Y/%m/%d %H:%M') if c_data.get('ctime') else "N/A"
                     is_sel = path in self.selected_files
                     stat_char = "🔒" if path in self.protected_paths else ("☑" if is_sel else "☐")
                     display_path, base_name = path, os.path.basename(path)
                     if _is_virtual_path(path):
                         archive_path, inner_path = _parse_virtual_path(path)
-                        if archive_path: display_path = f"{os.path.basename(archive_path)}{VPATH_SEPARATOR}{inner_path}"
-                        base_name = inner_path
+                        if archive_path: display_path = f"{os.path.basename(archive_path)}{VPATH_SEPARATOR}{inner_path}"; base_name = inner_path
                     self.tree.insert(pid, "end", iid=cid, values=(stat_char, f"  └─ {base_name}", display_path, "", c_size, c_ctime, val_str), tags=tuple(ctags))
                     self.child_to_parent[cid] = pid; self.parent_to_children[pid].append(cid); self.item_to_path[cid] = path
                 self._update_group_checkbox(pid)
@@ -951,51 +890,30 @@ class MainWindow(tk.Tk):
         if self.tree.identify_column(event.x) in ("#1", "#2"):
             tags = self.tree.item(item_id, "tags")
             if 'parent_item' in tags:
-                if self.config.get('comparison_mode') == 'qr_detection':
-                    self._toggle_selection_by_item_id(item_id)
-                else:
-                    self._toggle_group_selection(item_id)
-            elif 'child_item' in tags:
-                self._toggle_selection_by_item_id(item_id)
+                if self.config.get('comparison_mode') == 'qr_detection': self._toggle_selection_by_item_id(item_id)
+                else: self._toggle_group_selection(item_id)
+            elif 'child_item' in tags: self._toggle_selection_by_item_id(item_id)
                 
-
     def _on_treeview_double_click(self, event: tk.Event):
-        """【最終修正版】智慧判斷路徑類型，正確開啟資料夾或檔案所在目錄。"""
         if self.tree.identify_region(event.x, event.y) == "cell":
             item_id = self.tree.identify_row(event.y)
             if not item_id: return
-
-            # 展開/收合羣組的邏輯保持不變
             if 'parent_item' in self.tree.item(item_id, "tags"):
-                # 在 QR 模式或外掛模式下，父項本身就是可操作項目，不應被雙擊展開
                 is_container_node = self.config.get('comparison_mode') in ['mutual_comparison', 'ad_comparison']
-                if is_container_node:
-                    self.tree.item(item_id, open=not self.tree.item(item_id, "open"))
-
-            # 檢查是否點在 'path' 欄位
+                if is_container_node: self.tree.item(item_id, open=not self.tree.item(item_id, "open"))
             if self.tree.identify_column(event.x) == "#3":
                 path_value = self.item_to_path.get(item_id)
                 if path_value:
                     folder_to_open = None
-                    
-                    # 【核心修正】
-                    # 1. 檢查路徑本身是否就是一個存在的資料夾 (適用於外掛模式)
-                    if os.path.isdir(path_value):
-                        folder_to_open = path_value
-                    # 2. 否則，再嘗試獲取其父目錄 (適用於核心模式的檔案路徑)
+                    if os.path.isdir(path_value): folder_to_open = path_value
                     else:
                         real_path = path_value
                         if _is_virtual_path(real_path):
                             archive_path, _ = _parse_virtual_path(real_path)
                             if archive_path: real_path = archive_path
-                        
-                        if os.path.exists(real_path):
-                             folder_to_open = os.path.dirname(real_path)
-                    
-                    if folder_to_open and os.path.isdir(folder_to_open):
-                        _open_folder(folder_to_open)
-                    else:
-                        log_warning(f"無法開啓路徑，因為它不是一個有效的資料夾: {folder_to_open}")
+                        if os.path.exists(real_path): folder_to_open = os.path.dirname(real_path)
+                    if folder_to_open and os.path.isdir(folder_to_open): _open_folder(folder_to_open)
+                    else: log_info(f"無法開啓路徑，因為它不是一個有效的資料夾: {folder_to_open}")
                     
     def _handle_return_key(self, event: tk.Event) -> str:
         sel = self.tree.selection()
@@ -1012,120 +930,62 @@ class MainWindow(tk.Tk):
         if self.is_closing or not self.winfo_exists(): return
         self._after_id = None
         sel = self.tree.selection()
-
-        # 【核心修正】將 get_display_path 移到此處
         def get_display_path(item_id):
             path = self.item_to_path.get(item_id)
             if not path: return None
-            if path in self.all_file_data and 'display_path' in self.all_file_data[path]:
-                return self.all_file_data[path]['display_path']
+            if path in self.all_file_data and 'display_path' in self.all_file_data[path]: return self.all_file_data[path]['display_path']
             return path
-
         if not sel or not self.tree.exists(sel[0]):
             self.pil_img_target = self.pil_img_compare = None
             self._update_all_previews()
-            self.target_path_label.config(text="")
-            self.compare_path_label.config(text="")
+            self.target_path_label.config(text=""); self.compare_path_label.config(text="")
             return
-            
-        item_id = sel[0]
-        preview_path, compare_path = None, None
+        item_id = sel[0]; preview_path, compare_path = None, None
         tags = self.tree.item(item_id, "tags")
-
-        # 修正的預覽邏輯
         if 'parent_item' in tags:
-            # 統一預覽第一個子項（如果存在）
             children = self.tree.get_children(item_id)
-            if children:
-                preview_path = get_display_path(children[0])
-            else: # 對於沒有子項的父項（例如某些外掛結果），直接預覽父項
-                preview_path = get_display_path(item_id)
+            if children: preview_path = get_display_path(children[0])
+            else: preview_path = get_display_path(item_id)
             compare_path = None
-        else: # child_item
+        else:
             preview_path = get_display_path(item_id)
             parent_id = self.child_to_parent.get(item_id)
-            if parent_id and self.tree.get_children(parent_id):
-                compare_path = get_display_path(self.tree.get_children(parent_id)[0])
-        
-        self.current_target_path = preview_path
-        self.current_compare_path = compare_path
-
-        if preview_path:
-            self.executor.submit(self._load_image_worker, preview_path, True)
-        else:
-            self.pil_img_target = None
-            self.target_path_label.config(text="")
-            self._update_all_previews()
-
-        if compare_path:
-            self.executor.submit(self._load_image_worker, compare_path, False)
-        else:
-            self.pil_img_compare = None
-            self.compare_path_label.config(text="")
-            self._update_all_previews()
+            if parent_id and self.tree.get_children(parent_id): compare_path = get_display_path(self.tree.get_children(parent_id)[0])
+        self.current_target_path = preview_path; self.current_compare_path = compare_path
+        if preview_path: self.executor.submit(self._load_image_worker, preview_path, True)
+        else: self.pil_img_target = None; self.target_path_label.config(text=""); self._update_all_previews()
+        if compare_path: self.executor.submit(self._load_image_worker, compare_path, False)
+        else: self.pil_img_compare = None; self.compare_path_label.config(text=""); self._update_all_previews()
 
     def _load_image_worker(self, path: str, is_target: bool):
         img = None
         try:
-            # 讀圖（支援實檔與虛擬路徑）
             img = _open_image_from_any_path(path)
-            if img is None:
-                raise IOError("無法從通用接口開啟圖片")
-
-            # 某些格式（如 WebP）為 lazy decode，先強制解碼，避免 copy 後仍引用來源
-            try:
-                img.load()
-            except Exception:
-                pass
-
-            # EXIF 旋轉 & 轉成 RGB（若已是 RGB 不會有開銷）
-            try:
-                img = ImageOps.exif_transpose(img)
-            except Exception:
-                # 個別檔沒 EXIF 或 Pillow 版本差異，忽略即可
-                pass
-
-            if img.mode != "RGB":
-                img = img.convert("RGB")
-
-            # 丟到預覽佇列（用 copy() 確保與關閉原圖分離）
-            self.preview_queue.put({
-                'type': 'image_loaded',
-                'image': img.copy(),
-                'is_target': is_target
-            })
-
-            # 路徑顯示（虛擬路徑轉成「壓縮檔名|內部檔名」）
+            if img is None: raise IOError("無法從通用接口開啟圖片")
+            try: img.load()
+            except Exception: pass
+            try: img = ImageOps.exif_transpose(img)
+            except Exception: pass
+            if img.mode != "RGB": img = img.convert("RGB")
+            self.preview_queue.put({'type': 'image_loaded', 'image': img.copy(), 'is_target': is_target})
             display_path = path
             if _is_virtual_path(path):
                 archive_path, inner_path = _parse_virtual_path(path)
-                if archive_path:
-                    display_path = f"{os.path.basename(archive_path)}{VPATH_SEPARATOR}{inner_path}"
-
+                if archive_path: display_path = f"{os.path.basename(archive_path)}{VPATH_SEPARATOR}{inner_path}"
             label = self.target_path_label if is_target else self.compare_path_label
             label.after(0, lambda dp=display_path, lbl=label: lbl.config(text=f"路徑: {dp}"))
-
         except Exception as e:
-            # 失敗時更新路徑標籤 + 回報 GUI
             label = self.target_path_label if is_target else self.compare_path_label
             basename = os.path.basename(path) if isinstance(path, str) else str(path)
             label.after(0, lambda b=basename, lbl=label: lbl.config(text=f"無法載入: {b}"))
             log_error(f"載入圖片預覽失敗 '{path}': {e}", True)
-            try:
-                self.preview_queue.put({'type': 'image_loaded', 'image': None, 'is_target': is_target})
-            except Exception:
-                pass
-
+            try: self.preview_queue.put({'type': 'image_loaded', 'image': None, 'is_target': is_target})
+            except Exception: pass
         finally:
-            # 關閉原圖資源（不影響丟進 Queue 的 copy）
             try:
-                if img is not None:
-                    img.close()
-            except Exception:
-                pass
+                if img is not None: img.close()
+            except Exception: pass
 
-            
-            
     def _update_all_previews(self):
         self._resize_and_display(self.target_image_label, self.pil_img_target, True)
         self._resize_and_display(self.compare_image_label, self.pil_img_compare, False)
@@ -1145,16 +1005,11 @@ class MainWindow(tk.Tk):
             if is_target: self.img_tk_target = None
             else: self.img_tk_compare = None
             return
-        
         w, h = label.winfo_width(), label.winfo_height()
         if w <= 1 or h <= 1: return
-        
-        img_copy = pil_image.copy()
-        img_copy.thumbnail((w - 10, h - 10), Image.Resampling.LANCZOS)
-
+        img_copy = pil_image.copy(); img_copy.thumbnail((w - 10, h - 10), Image.Resampling.LANCZOS)
         path = self._last_target_path if is_target else self._last_compare_path
         src_size = self._last_target_src_size if is_target else self._last_compare_src_size
-        
         if path and src_size and path in self.all_file_data:
             data = self.all_file_data.get(path, {})
             qr_points = data.get('qr_points')
@@ -1162,119 +1017,77 @@ class MainWindow(tk.Tk):
                 scale = min(img_copy.width / src_size[0], img_copy.height / src_size[1])
                 scaled_polys = [[(int(x * scale), int(y * scale)) for x, y in poly] for poly in qr_points]
                 self._draw_qr_polygons_on_image(img_copy, scaled_polys)
-
-        img_tk = ImageTk.PhotoImage(img_copy)
-        label.config(image=img_tk); label.image = img_tk
+        img_tk = ImageTk.PhotoImage(img_copy); label.config(image=img_tk); label.image = img_tk
         if is_target: self.img_tk_target = img_tk
         else: self.img_tk_compare = img_tk
         
     def _draw_qr_polygons_on_image(self, img, polys, color=(0, 255, 0), alpha=90, outline_thickness=None):
         if not polys or ImageDraw is None: return
-        
-        if outline_thickness is None:
-            outline_thickness = max(1, int(min(img.size) / 200))
-
-        base = img.convert("RGBA")
-        overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        if outline_thickness is None: outline_thickness = max(1, int(min(img.size) / 200))
+        base = img.convert("RGBA"); overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
         draw_overlay = ImageDraw.Draw(overlay)
         fill_rgba = (color[0], color[1], color[2], max(0, min(255, int(alpha))))
         line_rgba = (color[0], color[1], color[2], 255)
-
         for poly in polys:
             if len(poly) < 2: continue
-            try:
-                draw_overlay.polygon(poly, fill=fill_rgba, outline=line_rgba, width=outline_thickness)
-            except TypeError: # Fallback for older Pillow
-                draw_overlay.polygon(poly, fill=fill_rgba)
-                draw_overlay.line(list(poly) + [poly[0]], fill=line_rgba, width=outline_thickness)
-        
-        composed = Image.alpha_composite(base, overlay).convert("RGB")
-        img.paste(composed)
+            try: draw_overlay.polygon(poly, fill=fill_rgba, outline=line_rgba, width=outline_thickness)
+            except TypeError: draw_overlay.polygon(poly, fill=fill_rgba); draw_overlay.line(list(poly) + [poly[0]], fill=line_rgba, width=outline_thickness)
+        composed = Image.alpha_composite(base, overlay).convert("RGB"); img.paste(composed)
 
     def _on_preview_image_click(self, is_target_image: bool):
         current_path = self.current_target_path if is_target_image else self.current_compare_path
         if not current_path: return
-            
         folder_to_open = None
         if _is_virtual_path(current_path):
             archive_path, _ = _parse_virtual_path(current_path)
             if archive_path: folder_to_open = os.path.dirname(archive_path)
-        else:
-            folder_to_open = os.path.dirname(current_path)
-            
-        if folder_to_open and os.path.isdir(folder_to_open):
-            _open_folder(folder_to_open)
+        else: folder_to_open = os.path.dirname(current_path)
+        if folder_to_open and os.path.isdir(folder_to_open): _open_folder(folder_to_open)
             
     def _toggle_selection_by_item_id(self, item_id: str):
         if 'protected_item' in self.tree.item(item_id, "tags"): return
         path = self.item_to_path.get(item_id)
         if not path: return
-        
-        if path in self.selected_files:
-            self.selected_files.discard(path)
-            self.tree.set(item_id, "status", "☐")
-        else:
-            self.selected_files.add(path)
-            self.tree.set(item_id, "status", "☑")
-        
+        if path in self.selected_files: self.selected_files.discard(path); self.tree.set(item_id, "status", "☐")
+        else: self.selected_files.add(path); self.tree.set(item_id, "status", "☑")
         parent_id = self.child_to_parent.get(item_id)
-        if parent_id:
-            self._update_group_checkbox(parent_id)
+        if parent_id: self._update_group_checkbox(parent_id)
             
     def _toggle_group_selection(self, parent_id: str):
         children = self.parent_to_children.get(parent_id, [])
         if not children: return
         selectable = [self.item_to_path.get(cid) for cid in children if 'protected_item' not in self.tree.item(cid, "tags") and self.item_to_path.get(cid)]
         if not selectable: return
-        selected_count = sum(1 for p in selectable if p in self.selected_files)
-        is_fully_selected = selected_count == len(selectable)
-        if is_fully_selected:
-            self.selected_files.difference_update(selectable)
-        else:
-            self.selected_files.update(selectable)
+        is_fully_selected = sum(1 for p in selectable if p in self.selected_files) == len(selectable)
+        if is_fully_selected: self.selected_files.difference_update(selectable)
+        else: self.selected_files.update(selectable)
         self._update_group_checkbox(parent_id)
         
     def _update_group_checkbox(self, parent_id: str):
         if not parent_id or not self.tree.exists(parent_id): return
         children = self.parent_to_children.get(parent_id, [])
         selectable = [cid for cid in children if 'protected_item' not in self.tree.item(cid, "tags")]
-        if not selectable:
-            self.tree.set(parent_id, "status", "")
-            return
-            
+        if not selectable: self.tree.set(parent_id, "status", ""); return
         selected_count = sum(1 for cid in selectable if self.item_to_path.get(cid) in self.selected_files)
         for child_id in children:
             path = self.item_to_path.get(child_id)
-            if 'protected_item' in self.tree.item(child_id, "tags"):
-                self.tree.set(child_id, "status", "🔒")
-            else:
-                self.tree.set(child_id, "status", "☑" if path in self.selected_files else "☐")
-        
+            if 'protected_item' in self.tree.item(child_id, "tags"): self.tree.set(child_id, "status", "🔒")
+            else: self.tree.set(child_id, "status", "☑" if path in self.selected_files else "☐")
         tags = list(self.tree.item(parent_id, "tags"))
         if 'parent_partial_selection' in tags: tags.remove('parent_partial_selection')
-        
-        if selected_count == 0:
-            self.tree.set(parent_id, "status", "☐")
-        elif selected_count == len(selectable):
-            self.tree.set(parent_id, "status", "☑")
-        else:
-            self.tree.set(parent_id, "status", "◪")
-            tags.append('parent_partial_selection')
-            
+        if selected_count == 0: self.tree.set(parent_id, "status", "☐")
+        elif selected_count == len(selectable): self.tree.set(parent_id, "status", "☑")
+        else: self.tree.set(parent_id, "status", "◪"); tags.append('parent_partial_selection')
         self.tree.item(parent_id, tags=tuple(tags))
         
     def _toggle_selection_with_space(self, event: tk.Event) -> str:
         sel = self.tree.selection()
         if not sel: return "break"
-        item_id = sel[0]
-        tags = self.tree.item(item_id, "tags")
+        item_id = sel[0]; tags = self.tree.item(item_id, "tags")
         if 'parent_item' in tags:
-            if self.config.get('comparison_mode') == 'qr_detection':
-                self._toggle_selection_by_item_id(item_id)
-            else:
-                self._toggle_group_selection(item_id)
-        else:
-            self._toggle_selection_by_item_id(item_id)
+            if self.config.get('comparison_mode') == 'qr_detection': self._toggle_selection_by_item_id(item_id)
+            else: self._toggle_group_selection(item_id)
+        else: self._toggle_selection_by_item_id(item_id)
         return "break"
         
     def _get_all_selectable_paths(self):
@@ -1284,22 +1097,12 @@ class MainWindow(tk.Tk):
         for item_id in self.tree.get_children(""):
             if self.config.get('comparison_mode') == 'qr_detection':
                  path = self.item_to_path.get(item_id)
-                 if 'protected_item' not in self.tree.item(item_id, "tags"):
-                    self.tree.set(item_id, "status", "☑" if path in self.selected_files else "☐")
-            elif 'parent_item' in self.tree.item(item_id, "tags"):
-                 self._update_group_checkbox(item_id)
+                 if 'protected_item' not in self.tree.item(item_id, "tags"): self.tree.set(item_id, "status", "☑" if path in self.selected_files else "☐")
+            elif 'parent_item' in self.tree.item(item_id, "tags"): self._update_group_checkbox(item_id)
             
-    def _select_all(self):
-        self.selected_files.update(self._get_all_selectable_paths())
-        self._refresh_all_checkboxes()
-        
-    def _deselect_all(self):
-        self.selected_files.clear()
-        self._refresh_all_checkboxes()
-        
-    def _invert_selection(self):
-        self.selected_files.symmetric_difference_update(self._get_all_selectable_paths())
-        self._refresh_all_checkboxes()
+    def _select_all(self): self.selected_files.update(self._get_all_selectable_paths()); self._refresh_all_checkboxes()
+    def _deselect_all(self): self.selected_files.clear(); self._refresh_all_checkboxes()
+    def _invert_selection(self): self.selected_files.symmetric_difference_update(self._get_all_selectable_paths()); self._refresh_all_checkboxes()
     
     def _select_suggested_for_deletion(self):
         paths_to_select = set()
@@ -1312,44 +1115,37 @@ class MainWindow(tk.Tk):
                         path = self.item_to_path.get(child_id)
                         if path: paths_to_select.add(path)
         if not paths_to_select: messagebox.showinfo("提示", "沒有找到相似度為 100.0% 的可選項目。", parent=self); return
-        self.selected_files.update(paths_to_select)
-        self._refresh_all_checkboxes()
+        self.selected_files.update(paths_to_select); self._refresh_all_checkboxes()
        
-        
     def _get_unique_ad_path(self, ad_dir: str, suggested_name: str) -> str:
-        base, ext = os.path.splitext(suggested_name)
+        base, ext = os.path.splitext(suggested_name);
         if not ext: ext = ".png"
         cand = f"ad_{base}{ext}"; i = 1
-        while os.path.exists(os.path.join(ad_dir, cand)):
-            cand = f"ad_{base}_{i}{ext}"; i += 1
+        while os.path.exists(os.path.join(ad_dir, cand)): cand = f"ad_{base}_{i}{ext}"; i += 1
         return os.path.join(ad_dir, cand)
         
     def _copy_selected_to_ad_library(self):
         ad_dir = self.config.get('ad_folder_path') or ""
         if not ad_dir or not os.path.isdir(ad_dir): messagebox.showerror("錯誤", "請先在設定中指定有效的『廣告圖片資料夾』路徑。"); return
-        
         selected_paths = self.selected_files.copy()
         if not selected_paths: messagebox.showinfo("提示", "請先在結果列表勾選要複製的圖片。"); return
-        
         os.makedirs(ad_dir, exist_ok=True)
-        ad_cache = ScannedImageCacheManager(ad_dir)
         copied = 0
         for src in sorted(selected_paths):
             try:
                 if _is_virtual_path(src):
                     archive_path, inner_path = _parse_virtual_path(src)
                     base_name = os.path.basename(inner_path)
-                else: base_name = os.path.basename(src)
-                dst = self._get_unique_ad_path(ad_dir, base_name)
-                if _is_virtual_path(src):
-                    archive_path, inner_path = _parse_virtual_path(src)
-                    data = archive_handler.get_image_bytes(archive_path, inner_path)
+                    data = utils.archive_handler.get_image_bytes(archive_path, inner_path)
                     if not data: raise IOError("無法從壓縮檔讀取圖片位元組。")
+                    dst = self._get_unique_ad_path(ad_dir, base_name)
                     with open(dst, "wb") as f: f.write(data)
-                else: shutil.copy2(src, dst)
+                else: 
+                    base_name = os.path.basename(src)
+                    dst = self._get_unique_ad_path(ad_dir, base_name)
+                    shutil.copy2(src, dst)
                 copied += 1
             except Exception as e: log_error(f"複製到廣告庫失敗: {src}: {e}", True)
-        ad_cache.save_cache()
         if copied:
             self.status_label.config(text=f"📦 已複製 {copied} 張到廣告庫")
             messagebox.showinfo("完成", f"已複製 {copied} 張圖片到廣告庫。\n位置：{ad_dir}")
@@ -1362,15 +1158,12 @@ class MainWindow(tk.Tk):
         if not messagebox.askyesno("確認刪除", f"確定要將 {len(to_delete)} 個圖片移至回收桶嗎？"): return
         deleted_count, failed_count = 0, 0
         for path in to_delete:
-            if _is_virtual_path(path):
-                log_error(f"無法直接刪除虛擬路徑: {path}。此功能待實現。"); failed_count += 1; continue
-            try:
-                send2trash.send2trash(os.path.abspath(path)); deleted_count += 1
+            if _is_virtual_path(path): log_error(f"無法直接刪除虛擬路徑: {path}。此功能待實現。"); failed_count += 1; continue
+            try: send2trash.send2trash(os.path.abspath(path)); deleted_count += 1
             except Exception as e: log_error(f"移至回收桶失敗 {path}: {e}", True); failed_count += 1
         messagebox.showinfo("刪除完成", f"成功刪除 {deleted_count} 個檔案。\n{failed_count} 個檔案刪除失敗。")
         self.all_found_items = [(p1, p2, v) for p1, p2, v in self.all_found_items if p1 not in to_delete and p2 not in to_delete]
-        self.selected_files.clear()
-        self._process_scan_results([])
+        self.selected_files.clear(); self._process_scan_results([])
         
     def _open_selected_folder_single(self):
         sel = self.tree.selection()
@@ -1381,8 +1174,7 @@ class MainWindow(tk.Tk):
                 if _is_virtual_path(path):
                     archive_path, _ = _parse_virtual_path(path)
                     if archive_path: folder_to_open = os.path.dirname(archive_path)
-                else:
-                    folder_to_open = os.path.dirname(path)
+                else: folder_to_open = os.path.dirname(path)
                 if folder_to_open and os.path.isdir(folder_to_open): _open_folder(folder_to_open)
                 
     def _collapse_all_groups(self):
@@ -1411,3 +1203,88 @@ class MainWindow(tk.Tk):
         else:
             self.executor.shutdown(wait=False, cancel_futures=True)
             self.destroy()
+
+# === MODIFICATION START: Updated Plugin API Documentation ===
+"""
+Plugin API (外掛開發者指南)
+--------------------------
+前置處理器 (preprocessor) 類型的外掛可以實作以下函式來與主程式的設定 UI (SettingsGUI) 進行更深度的整合。
+所有函式皆為可選，您可以根據需求實作。
+
+新的 UI 系統將所有前置處理器外掛的設定區塊，以堆疊的 LabelFrame 形式呈現在「擴充功能」分頁中。
+
+---
+### 可選實作的函式 (Methods)
+---
+
+1) get_settings_frame(parent, config, ui_vars) -> ttk.Frame
+   - **(最核心的 UI 函式)** 建立並回傳包含您外掛所有設定元件的容器。
+   - `parent` (ttk.Frame): 您應該將所有 UI 元件（如 Entry, Checkbutton）建立在此容器之內。
+   - `config` (dict): 當前設定的唯讀字典，可用來讀取初始值。
+   - `ui_vars` (dict): 一個共享的字典，用於存放 Tkinter 變數 (例如 tk.StringVar, tk.BooleanVar)。
+     強烈建議將您的 Tkinter 變數存入此字典，以便主程式和 `save_settings` 函式可以存取。
+   - **回傳值**: 包含所有設定元件的 ttk.Frame。您 **不應該** 對回傳的 frame 呼叫 `.pack()` 或 `.grid()`。
+
+2) save_settings(config, ui_vars) -> dict
+   - 在使用者點擊「保存並關閉」時被呼叫。
+   - **職責**: 從 `ui_vars` 字典中讀取您外掛的 Tkinter 變數值，更新 `config` 字典，最後回傳更新後的 `config`。
+   - **範例**: `config['your_setting_key'] = ui_vars['your_tk_var_key'].get()`
+
+3) plugin_prefers_inner_enable() -> bool
+   - **(管理啟用狀態的關鍵)** 告知主程式，您的外掛是否會自行管理「啟用」狀態。
+   - **回傳 `True`**:
+     - 主程式 **不會** 為您的外掛自動產生一個外層的「啟用 XXX」勾選框。
+     - 您 **必須** 在 `get_settings_frame` 中自行建立一個啟用勾選框。
+     - 當此勾選框被取消時，主程式只會隱藏您設定區塊的 **內部元件**，保留標題和啟用框本身，方便使用者重新啟用。
+   - **回傳 `False` (預設)**:
+     - 主程式會自動為您的設定區塊加上一個「啟用 XXX」勾選框。
+     - 當此勾選框被取消時，您的 **整個設定區塊** (包含標題) 都會被隱藏。
+
+4) get_slot_order() -> int
+   - 定義您外掛設定區塊在「擴充功能」頁面中的顯示順序。數值越小，顯示位置越靠上。
+   - 預設值: 999 (排在最後)。
+
+5) get_tab_label() -> str
+   - 自訂您設定區塊 (LabelFrame) 的標題文字。
+   - 如果未實作，預設使用 `get_name()` 的回傳值。
+
+---
+### 最佳實踐：如何整合「自行啟用」功能
+---
+
+如果您希望對啟用流程有更精細的控制（例如，啟用時才顯示某些元件），請遵循以下步驟：
+
+1.  **宣告**: 在您的外掛 Processor 類別中，實作 `plugin_prefers_inner_enable` 並回傳 `True`。
+    ```python
+    def plugin_prefers_inner_enable(self):
+        return True
+    ```
+
+2.  **建立共用變數**: 在 `get_settings_frame` 中，使用標準化的鍵名 `f"enable_{plugin_id}"` 來從 `ui_vars` 存取或建立 `tk.BooleanVar`。這確保了主程式和您的外掛操作的是同一個變數。
+    ```python
+    # 在 get_settings_frame 中
+    plugin_id = "your_plugin_id"
+    enable_key = f"enable_{plugin_id}"
+    
+    enable_var = ui_vars.get(enable_key)
+    if not isinstance(enable_var, tk.BooleanVar):
+        initial_value = config.get(enable_key, False)
+        enable_var = tk.BooleanVar(value=initial_value)
+        ui_vars[enable_key] = enable_var
+    
+    # 建立您自己的啟用勾選框，並綁定到 enable_var
+    chk_enable = ttk.Checkbutton(parent, text="啟用我的酷炫功能", variable=enable_var)
+    chk_enable.pack(...)
+    ```
+
+3.  **保存狀態**: 在 `save_settings` 中，使用相同的標準鍵名來讀取變數並更新 `config`。
+    ```python
+    # 在 save_settings 中
+    plugin_id = "your_plugin_id"
+    enable_key = f"enable_{plugin_id}"
+    if enable_key in ui_vars:
+        config[enable_key] = ui_vars[enable_key].get()
+    return config
+    ```
+"""
+# === MODIFICATION END ===

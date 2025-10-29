@@ -197,7 +197,8 @@ class ScannedImageCacheManager:
         sanitized_root = _sanitize_path_for_filename(root_scan_folder)
         base_name = f"scanned_hashes_cache_{sanitized_root}"
         
-        self.cache_file_path = f"{base_name}.json"
+        from config import DATA_DIR
+        self.cache_file_path = os.path.join(DATA_DIR, f"{base_name}.json")
         counter = 1
         norm_root = _norm_key(root_scan_folder)
         while os.path.exists(self.cache_file_path):
@@ -315,7 +316,9 @@ class FolderStateCacheManager:
     def __init__(self, root_scan_folder: str):
         sanitized_root = _sanitize_path_for_filename(root_scan_folder)
         base_name = f"folder_state_cache_{sanitized_root}"
-        self.cache_file_path = f"{base_name}.json"
+        
+        from config import DATA_DIR
+        self.cache_file_path = os.path.join(DATA_DIR, f"{base_name}.json")
         norm_root = _norm_key(root_scan_folder)
         counter = 1
         while os.path.exists(self.cache_file_path):

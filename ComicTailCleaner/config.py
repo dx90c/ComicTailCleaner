@@ -1,24 +1,60 @@
 # ======================================================================
 # 檔案名稱：config.py
 # 模組目的：存放 ComicTailCleaner 的全域常數與預設設定
-# 版本：1.7.0 (新增 Schema 強化與錯誤隔離相關設定)
+# 版本：1.7.1 (路徑微調：config/log 置於 data/)
 # ======================================================================
 
+import os
+
+# === 基本路徑 ===
+_BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+DATA_DIR = os.path.join(_BASE_DIR, "data")
+
+# 確保 data/ 存在
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+except Exception:
+    # 若建立失敗，仍讓程式可用，但會回退到舊路徑
+    DATA_DIR = _BASE_DIR
+
 # === 應用程式基本資訊 ===
-APP_VERSION = "16.0.0"
+APP_VERSION = "16.0.1"
 APP_NAME_EN = "ComicTailCleaner"
 APP_NAME_TC = "漫畫尾頁廣告清理"
-CONFIG_FILE = "config.json"  # 用於保存使用者設定的檔案名稱
+
+# =============== 路徑常數（改為 data/） ===============
+# 設定檔存放於 data/config.json
+CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
+
+# 日誌檔（若 utils 有使用這兩個常數，將會自動寫到 data/）
+INFO_LOG_FILE = os.path.join(DATA_DIR, "info_log.txt")
+ERROR_LOG_FILE = os.path.join(DATA_DIR, "error_log.txt")
+# =====================================================
+# === 檔案路徑集中 ===
+def _in_data(name: str) -> str:
+    return os.path.join(DATA_DIR, name)
+
+# 既有的：
+CONFIG_FILE     = _in_data("config.json")
+INFO_LOG_FILE   = _in_data("info_log.txt")
+ERROR_LOG_FILE  = _in_data("error_log.txt")
+
+# 新增集中管理的檔名：
+def FOLDER_STATE_CACHE(tag: str) -> str:
+    # 例如 tag="E-Download" → data/folder_state_cache_E-Download.json
+    return _in_data(f"folder_state_cache_{tag}.json")
+
+def SCANNED_HASHES_CACHE(tag: str) -> str:
+    # 例如 tag="E-Download" → data/scanned_hashes_cache_E-Download.json
+    return _in_data(f"scanned_hashes_cache_{tag}.json")
+
+QUARANTINE_FILE = _in_data("quarantine.json")
 
 # === 虛擬路徑系統常數 ===
-# 這是為了讓程式能處理壓縮檔內的檔案所定義的特殊路徑格式
-# 格式: zip://C:/path/to/archive.cbz!/inner/image.jpg
 VPATH_PREFIX = "zip://"
 VPATH_SEPARATOR = "!"
 
 # === 核心設定預設值 ===
-# 這裡定義了所有可在設定介面中調整的選項的初始值。
-# 當 config.json 檔案不存在或損毀時，程式會使用這些預設值。
 default_config = {
     # --- 路徑設定 ---
     'root_scan_folder': '',          # 漫畫掃描的根目錄
@@ -47,48 +83,54 @@ default_config = {
 
     # --- 性能與進階設定 ---
     'worker_processes': 0,           # 用於計算圖片雜湊的進程數 (0 代表自動設定)
-    'ux_scan_start_delay': 0.1,      # 點擊開始後延遲多久開始計算，以確保UI能即時更新 (秒)
-    'enable_inter_folder_only': True,# 在互相比對模式下，是否只比對來自不同資料夾的圖片
-    'enable_ad_cross_comparison': True, # 在互相比對模式下，是否啟用與廣告庫的交叉比對來標記相似羣組
+    'ux_scan_start_delay': 0.1,      # 點擊開始後延遲多久開始計算 (秒)
+    'enable_inter_folder_only': True,# 在互相比對模式下，是否只比對不同資料夾的圖片
+    'enable_ad_cross_comparison': True, # 在互相比對模式下，是否啟用與廣告庫的交叉比對
     'enable_color_filter': True,     # 預設開啟顏色過濾
-    'cross_comparison_include_bw': False, # 進行交叉比對時，是否也比對純黑/純白圖片
-    
-    'changed_container_cap': 500, # 限制單一變更夾最多處理的容器(壓縮檔/子資料夾)數量，0為不限制
-    'global_extract_cap': 100000,  # 非QR模式下的全域檔案提取上限，0為不限制 (從 100000 下修)
-    
-    'enable_newest_first_pruning': True, # 啟用智慧型剪枝掃描，設為 false 則回退到傳統 BFS 掃描
-    'changed_container_depth_limit': 1, # 處理變更夾時，向下遞迴掃描的深度上限
-    'folder_time_mode': 'mtime',        # 資料夾時間基準: 'mtime', 'ctime', 或 'hybrid' (取最大值)
+    'cross_comparison_include_bw': False, # 交叉比對時是否也比對純黑/純白
 
-    # --- 【新增 v1.6.0】 進階快取與增量比對設定 ---
-    'preserve_cache_across_time_windows': True, # 跨時間篩選窗口時，是否保留舊快取
-    'prune_image_cache_on_missing_folder': False, # 當資料夾不存在時，是否自動清理其圖片快取
-    'container_empty_mark': True,             # 是否標記無圖資料夾以加速後續掃描
-    'cache_flush_threshold': 10000,             # 快取批次寫入的閾值
+    'changed_container_cap': 500,
+    'global_extract_cap': 100000,
+
+    'enable_newest_first_pruning': True,
+    'changed_container_depth_limit': 1,
+    'folder_time_mode': 'mtime',
+
+    # --- 【v1.6.0】 進階快取與增量比對設定 ---
+    'preserve_cache_across_time_windows': True,
+    'prune_image_cache_on_missing_folder': False,
+    'container_empty_mark': True,
+    'cache_flush_threshold': 10000,
     "first_scan_extract_count": 64,
-    # --- 【新增 v1.7.0】 ---
-    'enable_quarantine': True,                # 是否啟用錯誤隔離機制
-    'enable_quick_digest': True,              # 是否啟用快速摘要以增強快取準確性
+
+    # --- 【v1.7.0】 ---
+    'enable_quarantine': True,
+    'enable_quick_digest': True,
+
+    # --- 【v1.8.0】 EH 前置處理器設定 ---
+    'enable_eh_preprocessor': False,
+    'eh_data_directory': '',
+    'eh_backup_directory': '',
+    'eh_syringe_directory': '',
+    'eh_mmd_json_path': '',  # --- 【v1.8.1 新增】 ---
+
     # --- UI 顯示設定 ---
-    'page_size': 'all',              # 結果列表中每頁顯示的項目數量
+    'page_size': 'all',
 }
 
 # === 雙哈希 LSH 演算法相關常數 ===
-# 這些是比對引擎內部的微調參數，通常不需要修改。
-HASH_BITS = 64                   # 感知雜湊的位元數 (64位元 = 8x8)
+HASH_BITS = 64
 
 # --- 相似度門檻 ---
-PHASH_FAST_THRESH = 0.80         # pHash 快速篩選的最低相似度門檻 (80%)，低於此值直接拋棄
-PHASH_STRICT_SKIP = 0.93         # pHash 相似度高到可以直接信任，無需 wHash 複核的門檻 (93%)
+PHASH_FAST_THRESH = 0.80
+PHASH_STRICT_SKIP = 0.93
 
-# --- wHash 複核分級門檻 (Tiers) ---
-# 當 pHash 相似度落在特定區間時，需要 wHash 達到對應的更高標準才能通過。
-# 這是為了過濾掉那些 pHash 看起來相似但實際上紋理細節差異很大的情況。
-WHASH_TIER_1 = 0.90              # 對應 pHash 區間: 0.90 <= sim < 0.93
-WHASH_TIER_2 = 0.92              # 對應 pHash 區間: 0.88 <= sim < 0.90
-WHASH_TIER_3 = 0.95              # 對應 pHash 區間: 0.85 <= sim < 0.88
-WHASH_TIER_4 = 0.98              # 對應 pHash 區間: 0.80 <= sim < 0.85
+# --- wHash 複核分級門檻 ---
+WHASH_TIER_1 = 0.90
+WHASH_TIER_2 = 0.92
+WHASH_TIER_3 = 0.95
+WHASH_TIER_4 = 0.98
 
-# --- LSH (局部敏感雜湊) 相關設定 ---
-AD_GROUPING_THRESHOLD = 0.95     # 在預處理廣告庫時，用於將極度相似的廣告分組的內部固定門檻 (95%)
-LSH_BANDS = 4                    # 將 64 位元的雜湊值分成 4 個 16 位元的 "band" 進行索引，以加速尋找候選圖片
+# --- LSH 相關設定 ---
+AD_GROUPING_THRESHOLD = 0.95
+LSH_BANDS = 4

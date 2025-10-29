@@ -15,6 +15,7 @@ import subprocess
 import threading
 import re
 from typing import Union, Optional, Tuple
+from config import INFO_LOG_FILE, ERROR_LOG_FILE
 
 # 延遲導入或選擇性導入
 try:
@@ -110,15 +111,16 @@ def _norm_key(p: str) -> str:
     return os.path.normcase(os.path.normpath(p))
 
 # === 日誌函式 (修正版) ===
+
+
 def log_error(message: str, include_traceback: bool = False):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_content = f"[{timestamp}] ERROR: {message}\n"
     if include_traceback:
         log_content += traceback.format_exc() + "\n"
-    log_file = "error_log.txt"
     print(log_content, end='', flush=True)
     try:
-        with open(log_file, "a", encoding="utf-8-sig", buffering=1) as f:
+        with open(ERROR_LOG_FILE, "a", encoding="utf-8-sig", buffering=1) as f:
             f.write(log_content)
     except Exception as e:
         print(f"FATAL: 無法寫入錯誤日誌檔案: {e}\n原始錯誤: {message}", flush=True)
@@ -126,10 +128,9 @@ def log_error(message: str, include_traceback: bool = False):
 def log_info(message: str):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_content = f"[{timestamp}] INFO: {message}\n"
-    log_file = "info_log.txt"
     print(log_content, end='', flush=True)
     try:
-        with open(log_file, "a", encoding="utf-8-sig", buffering=1) as f:
+        with open(INFO_LOG_FILE, "a", encoding="utf-8-sig", buffering=1) as f:
             f.write(log_content)
     except Exception as e:
         print(f"FATAL: 無法寫入資訊日誌檔案: {e}", flush=True)

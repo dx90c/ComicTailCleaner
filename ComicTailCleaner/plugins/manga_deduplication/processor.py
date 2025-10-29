@@ -1,14 +1,13 @@
 # ======================================================================
 # 檔案：plugins/manga_deduplication/processor.py
-# 目的：實現相似卷宗查找器，並完全依賴傳入的 config 進行操作
-# 版本：12.6.1 (修正：補上 typing.Set 匯入)
+# 目的：實現相似卷宗查找器，並與 BasePlugin v2.0 契約保持一致
+# 版本：12.6.2 (相容性修正：更新函式簽名以匹配 BasePlugin v2.0)
 # ======================================================================
 
 from __future__ import annotations
 import os
 import imagehash
 from collections import defaultdict
-# 【修正】從 typing 匯入 Set 型別
 from typing import Dict, Any, Tuple, List, Optional, Set
 from queue import Queue
 
@@ -30,27 +29,24 @@ from . import plugin_gui
 
 class MangaDeduplicationPlugin(BasePlugin):
     def __init__(self):
-        self.ui_vars = {}
+        # 移除 self.ui_vars，因為它將由主程式傳入
+        pass
 
     def get_id(self) -> str: return "manga_volume_deduplication_smart"
     def get_name(self) -> str: return "相似卷宗查找 (共享引擎版)"
     def get_description(self) -> str: return "呼叫核心掃描引擎，比對每個資料夾末尾N張圖片的指紋，找出相似的漫畫卷宗。"
 
-    def get_settings_frame(self, parent_frame: 'ttk.Frame', config: Dict[str, Any]) -> Optional['ttk.Frame']:
+    def get_settings_frame(self, parent_frame: 'ttk.Frame', config: Dict[str, Any], ui_vars: Dict) -> Optional['ttk.Frame']:
         if ttk is None: return None
-        frame = plugin_gui.create_settings_frame(parent_frame, config, self.ui_vars)
-        plugin_gui.load_settings(config, self.ui_vars)
+        frame = plugin_gui.create_settings_frame(parent_frame, config, ui_vars)
+        plugin_gui.load_settings(config, ui_vars)
         return frame
 
-    def save_settings(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        return plugin_gui.save_settings(config, self.ui_vars)
+    def save_settings(self, config: Dict[str, Any], ui_vars: Dict) -> Dict[str, Any]:
+        return plugin_gui.save_settings(config, ui_vars)
 
     @staticmethod
     def _tol_bits_from_slider(cfg: dict, default_pct: int = 100) -> int:
-        """
-        將 GUI 的相似度滑桿（0-100）換算成允許的 Hamming 距離（0-64）。
-        100%→0、95%→3、90%→6、80%→12（因 hash_size=8 → 64 bits）
-        """
         s = int(cfg.get("similarity_threshold", default_pct))
         if s < 0: s = 0
         if s > 100: s = 100
@@ -58,10 +54,6 @@ class MangaDeduplicationPlugin(BasePlugin):
 
     @staticmethod
     def _greedy_match_count(a: List["imagehash.ImageHash"], b: List["imagehash.ImageHash"], tol_bits: int) -> int:
-        """
-        在距離 <= tol_bits 下，估算可配對的最大張數（貪婪近似；對 sample<=12 規模足夠）。
-        每個 hash 只配一次，避免重複計數。
-        """
         if not a or not b: return 0
         used = [False] * len(b)
         matched = 0
@@ -70,7 +62,7 @@ class MangaDeduplicationPlugin(BasePlugin):
             for j, h2 in enumerate(b):
                 if used[j]: continue
                 try:
-                    if (h1 - h2) <= tol_bits:  # imagehash：相減 = Hamming distance
+                    if (h1 - h2) <= tol_bits:
                         hit = j
                         break
                 except Exception:
@@ -93,7 +85,6 @@ class MangaDeduplicationPlugin(BasePlugin):
             _, _, mtime = _get_file_stat(p)
             if mtime is None: continue
 
-            # --- Patch A Start ---
             cached = cache_manager.get_data(key)
             need_recalc = True
             if cached and abs(cached.get('mtime', 0.0) - mtime) < 1e-6 and cached.get('phash'):
@@ -104,7 +95,6 @@ class MangaDeduplicationPlugin(BasePlugin):
                     except Exception:
                         ph = None
                 if ph is not None:
-                    # ✨ 統一為 8x8；尺寸不符就重算
                     try:
                         shape = getattr(ph, "hash", None).shape if hasattr(ph, "hash") else None
                     except Exception:
@@ -116,7 +106,6 @@ class MangaDeduplicationPlugin(BasePlugin):
             if need_recalc:
                 paths_to_recalc.append(p)
                 if cached: results[key] = cached
-            # --- Patch A End ---
         
         if paths_to_recalc:
             total_recalc = len(paths_to_recalc)
@@ -129,21 +118,19 @@ class MangaDeduplicationPlugin(BasePlugin):
                 size, ctime, mtime = _get_file_stat(p)
                 if mtime is None: continue
 
-                # --- Patch A Start ---
                 try:
                     with _open_image_from_any_path(p) as img:
                         if img is None: continue
-                        ph = imagehash.phash(img, hash_size=8)  # ✨ 統一 8x8
+                        ph = imagehash.phash(img, hash_size=8)
                         new_data = {
                             'phash': str(ph),
-                            'phash_size': 8,          # ✨ 記下尺寸，之後可快速判斷
+                            'phash_size': 8,
                             'mtime': mtime, 'size': size, 'ctime': ctime
                         }
                         cache_manager.update_data(key, new_data)
                         
                         new_data['phash'] = ph
                         results[key] = new_data
-                # --- Patch A End ---
                 except Exception as e:
                     log_error(f'[外掛] 哈希失敗: {p}: {e}')
         return results
@@ -197,7 +184,7 @@ class MangaDeduplicationPlugin(BasePlugin):
         
         return fingerprints, folders_with_ads
 
-    def run(self, config: Dict, progress_queue: Optional[Queue] = None, control_events: Optional[Dict] = None) -> Optional[Tuple[List, Dict, List]]:
+    def run(self, config: Dict, progress_queue: Optional[Queue] = None, control_events: Optional[Dict] = None, app_update_callback: Optional[callable] = None) -> Optional[Tuple[List, Dict, List]]:
         _update_progress = lambda text, value=None: progress_queue.put({'type': 'progress' if value is not None else 'text', 'text': text, 'value': value}) if progress_queue else None
         _is_cancelled = lambda: bool(control_events and control_events.get('cancel') and control_events['cancel'].is_set())
         
@@ -266,8 +253,6 @@ class MangaDeduplicationPlugin(BasePlugin):
             fingerprints, folders_with_ads = self._build_fingerprints_with_ad_filter(
                 files_by_folder, ad_hashes_set, sample_count, main_cache, progress_queue, control_events)
 
-            # --- Patch B Start ---
-            # ✨ Debug：確認滑桿→容忍度、以及每夾指紋量
             tol_bits_dbg = self._tol_bits_from_slider(config, default_pct=100)
             lengths = sorted(len(v) for v in fingerprints.values())
             if lengths:
@@ -277,7 +262,6 @@ class MangaDeduplicationPlugin(BasePlugin):
                 log_info(f"[外掛] pHash容忍度={tol_bits_dbg} 位；指紋長度統計 夾數={len(lengths)}, P10={p10}, P50={p50}, P90={p90}")
             else:
                 log_info(f"[外掛] pHash容忍度={tol_bits_dbg} 位；無可用指紋")
-            # --- Patch B End ---
 
             _update_progress("🔄 比对指纹...", 75)
             folder_list = sorted(list(fingerprints.keys()))
@@ -286,10 +270,7 @@ class MangaDeduplicationPlugin(BasePlugin):
             if len(folder_list) < 2:
                 _update_progress("✅ [相似卷宗] 资料夹数量不足，无需比对。"); return [], {}, []
 
-            # --- Patch B Start ---
-            sample_pairs_logged = 0
             for i in range(len(folder_list)):
-            # --- Patch B End ---
                 if _is_cancelled():
                     if progress_queue: progress_queue.put({'type':'status_update', 'text':'外掛任務已中止'})
                     return None
@@ -316,12 +297,6 @@ class MangaDeduplicationPlugin(BasePlugin):
                         has_ads_flag = " (已濾廣告)" if folders_with_ads.get(path1) or folders_with_ads.get(path2) else ""
                         similarity_str = f"{intersection_size}/{min_len} 頁相似{has_ads_flag}"
                         found_items.append((min(path1, path2), max(path1, path2), similarity_str))
-                    # --- Patch B Start ---
-                    else:
-                        if sample_pairs_logged < 20:
-                            sample_pairs_logged += 1
-                    #       log_info(f"[外掛] 比對樣本：{os.path.basename(path1)} vs {os.path.basename(path2)} → 命中 {intersection_size}/{min_len}, 門檻 {current_threshold}, tol={tol_bits}")
-                    # --- Patch B End ---
             
             _update_progress("✅ 整理结果...", 95)
             gui_file_data = {}
