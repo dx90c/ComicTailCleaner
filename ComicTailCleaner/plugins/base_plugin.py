@@ -1,7 +1,7 @@
 # ======================================================================
 # 檔案：plugins/base_plugin.py
 # 目的：定義所有外掛必須遵守的基礎介面 (契約)
-# 版本：2.0 (新增 get_plugin_type 以支援多種類型外掛)
+# 版本：2.1 (新增 get_default_config 以支援設定自動化)
 # ======================================================================
 
 from __future__ import annotations
@@ -43,6 +43,17 @@ class BasePlugin(abc.ABC):
         """
         return ""
 
+    def get_default_config(self) -> Dict[str, Any]:
+        """
+        (可選) 向主程式宣告此外掛的預設設定值。
+        主程式啟動時會收集所有外掛的預設值，並與主設定合併。
+
+        **重要**: 為了避免與主程式或其他外掛的設定鍵衝突，
+        強烈建議所有鍵名都使用與外掛 ID 相關的唯一前綴。
+        例如，如果外掛 ID 是 'manga_dedupe'，則鍵名應為 'manga_dedupe_sample_count'。
+        """
+        return {}
+
     def get_settings_frame(self, parent_frame: 'ttk.Frame', config: Dict[str, Any], ui_vars: Dict) -> Optional['ttk.Frame']:
         """
         (可選) 建立並返回一個包含此外掛專屬設定的 tkinter/ttk 框架。
@@ -51,7 +62,7 @@ class BasePlugin(abc.ABC):
         Args:
             parent_frame: 應該放置設定元件的父 ttk.Frame。
             config: 當前的全域設定字典，供讀取預設值。
-            ui_vars: 一個空的字典，用於儲存此外掛的 UI 變數 (tk.StringVar, tk.BooleanVar 等)。
+            ui_vars: 一個共享的字典，用於儲存此外掛的 UI 變數 (tk.StringVar, tk.BooleanVar 等)。
         
         Returns:
             如果外掛有專屬設定，則返回建立的 ttk.Frame；否則返回 None。

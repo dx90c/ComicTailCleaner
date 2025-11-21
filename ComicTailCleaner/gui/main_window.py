@@ -1,7 +1,7 @@
 # ======================================================================
-# 檔案名稱：gui.py
-# 模組目的：包含所有 UI 元件，並新增前置處理器支援
-# 版本：1.8.4 (UI 重構: 智慧型外掛啟用 UI)
+# 檔案名稱：gui/main_window.py
+# 模組目的：包含主視窗邏輯 (已模組化拆分)
+# 版本：1.8.7 (完整修復版：補齊所有遺漏函式)
 # ======================================================================
 
 # --- 1. 標準函式庫 ---
@@ -29,10 +29,6 @@ try:
     import send2trash
 except ImportError:
     send2trash = None
-try:
-    from tkcalendar import DateEntry
-except ImportError:
-    DateEntry = None
     
 # --- 3. 本地模組 ---
 from config import CONFIG_FILE, default_config, APP_NAME_TC, APP_VERSION
@@ -58,429 +54,37 @@ try:
 except ImportError:
     def cpu_count(): return 4
 
-# === GUI 輔助類 ===
-class Tooltip:
-    def __init__(self, widget: tk.Widget, text: str):
-        self.widget = widget; self.text = text; self.tooltip_window = None; self.id = None; self.x = self.y = 0
-        self.widget.bind("<Enter>", self.enter); self.widget.bind("<Leave>", self.leave)
-    def enter(self, event: Union[tk.Event, None] = None) -> None: self.schedule()
-    def leave(self, event: Union[tk.Event, None] = None) -> None: self.unschedule(); self.hidetip()
-    def schedule(self) -> None: self.unschedule(); self.id = self.widget.after(500, self.showtip)
-    def unschedule(self) -> None:
-        id_ = self.id; self.id = None
-        if id_: self.widget.after_cancel(id_)
-    def showtip(self) -> None:
-        if self.tooltip_window: return
-        x, y, _, _ = self.widget.bbox("insert")
-        x += self.widget.winfo_rootx() + 25; y += self.widget.winfo_rooty() + 20
-        self.tooltip_window = tw = tk.Toplevel(self.widget)
-        tw.wm_overrideredirect(True); tw.wm_geometry(f"+{x}+{y}")
-        label = tk.Label(tw, text=self.text, justify='left', background="#ffffe0", relief='solid', borderwidth=1, font=("tahoma", "8", "normal"))
-        label.pack(ipadx=1)
-    def hidetip(self) -> None:
-        tw = self.tooltip_window; self.tooltip_window = None
-        if tw: tw.destroy()
-
-class SettingsGUI(tk.Toplevel):
-    def __init__(self, master: "MainWindow"):
-        super().__init__(master)
-        self.master = master
-        self.config = master.config.copy()
-        self.plugin_ui_vars = {} 
-
-        self.enable_extract_count_limit_var = tk.BooleanVar()
-        self.extract_count_var = tk.StringVar()
-        self.worker_processes_var = tk.StringVar()
-        self.similarity_threshold_var = tk.DoubleVar()
-        self.qr_resize_var = tk.StringVar()
-        
-        self.mode_key_map_to_internal = {"mutual_comparison": "mutual_comparison", "ad_comparison": "ad_comparison", "qr_detection": "qr_detection"}
-        for plugin_id in self.master.plugin_manager: self.mode_key_map_to_internal[plugin_id] = plugin_id
-        self.mode_key_map_from_internal = {v: k for k, v in self.mode_key_map_to_internal.items()}
-        
-        initial_mode = self.config.get('comparison_mode', 'ad_comparison')
-        initial_mode_key = self.mode_key_map_from_internal.get(initial_mode, initial_mode)
-        self.comparison_mode_var = tk.StringVar(value=initial_mode_key)
-        
-        self.enable_inter_folder_only_var = tk.BooleanVar()
-        self.enable_ad_cross_comparison_var = tk.BooleanVar()
-        self.enable_qr_hybrid_var = tk.BooleanVar()
-        self.enable_time_filter_var = tk.BooleanVar()
-        self.start_date_var = tk.StringVar()
-        self.end_date_var = tk.StringVar()
-        self.folder_time_mode_var = tk.StringVar()
-        self.page_size_var = tk.StringVar()
-        self.enable_color_filter_var = tk.BooleanVar()
-        self.enable_archive_scan_var = tk.BooleanVar()
-        
-        self.title(f"{APP_NAME_TC} v{APP_VERSION} - 設定"); self.geometry("700x900"); self.resizable(False, False)
-        self.transient(master); self.grab_set(); self.protocol("WM_DELETE_WINDOW", self.destroy)
-        
-        notebook = ttk.Notebook(self)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
-        main_tab = ttk.Frame(notebook)
-        notebook.add(main_tab, text="主設定")
-        main_frame = ttk.Frame(main_tab, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        main_frame.grid_columnconfigure(1, weight=1)
-
-        preproc_tab = ttk.Frame(notebook)
-        notebook.add(preproc_tab, text="擴充功能 (前置處理)")
-        
-        self._preprocessor_host = preproc_tab
-
-        self._create_widgets(main_frame)
-        self._setup_bindings()
-        self._load_settings_into_gui()
-        self._update_all_ui_states()
-        
-    def _update_all_ui_states(self, *args):
-        mode = self.comparison_mode_var.get()
-        is_plugin_mode = mode in self.master.plugin_manager
-        if hasattr(self, 'plugin_frames'):
-            for frame in self.plugin_frames.values(): frame.grid_forget()
-        if is_plugin_mode and hasattr(self, 'plugin_frames') and mode in self.plugin_frames:
-            self.plugin_frames[mode].grid(row=self.plugin_frame_row, column=0, columnspan=2, sticky="ew", pady=5, padx=5)
-        is_ad_mode = (mode == "ad_comparison")
-        is_hybrid_qr = (mode == "qr_detection" and self.enable_qr_hybrid_var.get())
-        is_cross_comp = (mode == "mutual_comparison" and self.enable_ad_cross_comparison_var.get())
-        ad_folder_state = tk.NORMAL if (is_ad_mode or is_hybrid_qr or is_cross_comp) else tk.DISABLED
-        self.ad_folder_entry.config(state=ad_folder_state)
-        self.ad_folder_button.config(state=ad_folder_state)
-        self.qr_hybrid_cb.config(state=tk.NORMAL if mode == "qr_detection" and utils.QR_SCAN_ENABLED else tk.DISABLED)
-        is_mutual = (mode == "mutual_comparison")
-        self.inter_folder_only_cb.config(state=tk.NORMAL if is_mutual else tk.DISABLED)
-        self.ad_cross_comparison_cb.config(state=tk.NORMAL if is_mutual else tk.DISABLED)
-
-    def _toggle_time_filter_fields(self, *args):
-        state = tk.NORMAL if self.enable_time_filter_var.get() else tk.DISABLED
-        self.start_date_entry.config(state=state)
-        self.end_date_entry.config(state=state)
-
-
-    def _init_plugin_slot_structures(self, slot_count: int = 6):
-        """
-        改為『堆疊式』容器：使用 grid 佈局確保頂部對齊。
-        """
-        if hasattr(self, "_preproc_stack_container") and self._preproc_stack_container.winfo_exists():
-            return
-
-        # self._preprocessor_host 就是 "擴充功能" 的分頁 (preproc_tab)
-        host_parent = getattr(self, "_preprocessor_host", self)
-
-        # === START: NEW GRID LAYOUT LOGIC ===
-        
-        # 1. 讓父容器 (分頁) 的網格可以拉伸
-        host_parent.grid_rowconfigure(1, weight=1)
-        host_parent.grid_columnconfigure(0, weight=1)
-
-        # 2. 建立用來堆疊外掛的容器
-        self._preproc_stack_container = ttk.Frame(host_parent)
-        
-        # 3. 將這個容器釘在網格的第 0 行 (頂部)
-        #    sticky="new" 表示向上(n)、向東(e)、向西(w)填滿網格單元
-        self._preproc_stack_container.grid(row=0, column=0, sticky="new")
-        
-        # === END: NEW GRID LAYOUT LOGIC ===
-
-        # 舊的 Notebook／slot 結構全部取消
-        self._plugin_slot_frames = {}
-        self._plugin_slot_count = 0
-        
-    def _place_preprocessor_plugins(self):
-        """
-        逐塊(LabelFrame)放外掛；不使用 Notebook，不顯示『擴充槽』。
-        外掛若宣告 plugin_prefers_inner_enable() 為 True，則由外掛自身的啟用勾選控制顯示；
-        否則主程式替它建立一個外層啟用勾選並控制顯示。
-        """
-        preprocessor_plugins = {
-            pid: p for pid, p in self.master.plugin_manager.items()
-            if p.get_plugin_type() == 'preprocessor'
-        }
-        if not preprocessor_plugins:
-            return
-
-        self._plugin_blocks = {}
-
-        items_sorted = sorted(
-            preprocessor_plugins.items(),
-            key=lambda kv: (getattr(kv[1], 'get_slot_order', lambda: 999)(), kv[0])
-        )
-
-
-        for plugin_id, plugin in items_sorted:
-            holder = ttk.LabelFrame(
-                self._preproc_stack_container,
-                text=getattr(plugin, 'get_tab_label', plugin.get_name)() or plugin.get_name(),
-                padding="10"
-            )
-
-            # === START: REPLACEMENT BLOCK (新的、更簡潔的邏輯) ===
-            
-            prefers_inner = getattr(plugin, 'plugin_prefers_inner_enable', lambda: False)()
-            
-            enable_key = f"enable_{plugin_id}"
-            self.plugin_ui_vars.setdefault(enable_key, tk.BooleanVar(value=self.config.get(enable_key, False)))
-            enable_var = self.plugin_ui_vars[enable_key]
-            
-            inner_content_frame = ttk.Frame(holder)
-            
-            if not prefers_inner:
-                # 類型 1: 外掛沒有內建啟用鈕。由主 GUI 建立並控制。
-                cb = ttk.Checkbutton(holder, text=f"啟用 {plugin.get_name()}", variable=enable_var)
-                desc = getattr(plugin, "get_description", lambda: "")() or ""
-                if desc: Tooltip(cb, desc)
-                cb.pack(anchor="w", fill="x", pady=(0, 6))
-
-                inner_content_frame.pack(fill="x", expand=True) # 內容永遠跟隨 Holder
-                
-                def create_outer_toggle(var, h):
-                    def _toggle():
-                        if var.get():
-                            if not h.winfo_manager(): h.pack(fill="x", expand=True, pady=6, padx=5)
-                        else:
-                            h.pack_forget()
-                    return _toggle
-                
-                toggle_func = create_outer_toggle(enable_var, holder)
-                enable_var.trace_add("write", lambda *args, f=toggle_func: f())
-                toggle_func()
-            else:
-                # 類型 2: 外掛有內建啟用鈕。主 GUI 只負責提供容器，不干涉顯示邏輯。
-                holder.pack(fill="x", expand=True, pady=6, padx=5)
-                inner_content_frame.pack(fill="x", expand=True)
-                # 注意：此處不再建立 toggle_func 或 trace 變數，完全交由外掛內部處理。
-
-            get_frame_func = getattr(plugin, "get_settings_frame", getattr(plugin, "create_settings_frame", None))
-            if get_frame_func:
-                try:
-                    plugin_frame = get_frame_func(inner_content_frame, self.config, self.plugin_ui_vars)
-                    # 外掛的 frame 已經由它自己在 plugin_gui.py 中 pack 了
-                except Exception as e:
-                    log_error(f"外掛 '{plugin.get_id()}' 的 get_settings_frame 發生錯誤: {e}", True)
-            
-            # === END: REPLACEMENT BLOCK ===
-
-            self._plugin_blocks[plugin_id] = {'holder': holder, 'inner': inner_content_frame, 'enable_var': enable_var}
-
-
-    def _create_widgets(self, frame: ttk.Frame):
-        row_idx = 0
-        
-        path_frame = ttk.LabelFrame(frame, text="路徑設定", padding="10")
-        path_frame.grid(row=row_idx, column=0, columnspan=2, sticky="ew", pady=5, padx=5)
-        path_frame.grid_columnconfigure(1, weight=1)
-        ttk.Label(path_frame, text="根掃描資料夾:").grid(row=0, column=0, sticky="w", pady=2)
-        self.root_scan_folder_entry = ttk.Entry(path_frame)
-        self.root_scan_folder_entry.grid(row=0, column=1, sticky="ew", padx=5)
-        ttk.Button(path_frame, text="瀏覽...", command=lambda: self._browse_folder(self.root_scan_folder_entry)).grid(row=0, column=2)
-        ttk.Label(path_frame, text="廣告圖片資料夾:").grid(row=1, column=0, sticky="w", pady=2)
-        self.ad_folder_entry = ttk.Entry(path_frame)
-        self.ad_folder_entry.grid(row=1, column=1, sticky="ew", padx=5)
-        self.ad_folder_button = ttk.Button(path_frame, text="瀏覽...", command=lambda: self._browse_folder(self.ad_folder_entry))
-        self.ad_folder_button.grid(row=1, column=2)
-        self.archive_scan_cb = ttk.Checkbutton(path_frame, text="啟用壓縮檔掃描 (ZIP/CBZ/RAR/CBR)", variable=self.enable_archive_scan_var)
-        self.archive_scan_cb.grid(row=2, column=0, columnspan=3, sticky="w", pady=5)
-        if not ARCHIVE_SUPPORT_ENABLED: self.archive_scan_cb.config(text="啟用壓縮檔掃描 (未找到 archive_handler.py)", state=tk.DISABLED)
-        row_idx += 1
-        
-        basic_settings_frame = ttk.LabelFrame(frame, text="基本與性能設定", padding="10")
-        basic_settings_frame.grid(row=row_idx, column=0, columnspan=2, sticky="ew", pady=5, padx=5)
-        basic_settings_frame.grid_columnconfigure(1, weight=1)
-        self.extract_count_limit_cb = ttk.Checkbutton(basic_settings_frame, text="啟用圖片抽取數量限制", variable=self.enable_extract_count_limit_var)
-        self.extract_count_limit_cb.grid(row=0, column=0, columnspan=3, sticky="w", pady=2)
-        ttk.Label(basic_settings_frame, text="提取末尾圖片數量:").grid(row=1, column=0, sticky="w", pady=2)
-        self.extract_count_spinbox = ttk.Spinbox(basic_settings_frame, from_=1, to=100, textvariable=self.extract_count_var, width=5)
-        self.extract_count_spinbox.grid(row=1, column=1, sticky="w", padx=5)
-        ttk.Label(basic_settings_frame, text="(從每個資料夾樹末尾提取N張)").grid(row=1, column=2, sticky="w")
-        ttk.Label(basic_settings_frame, text="工作進程數:").grid(row=3, column=0, sticky="w", pady=2)
-        ttk.Spinbox(basic_settings_frame, from_=0, to=cpu_count(), textvariable=self.worker_processes_var, width=5).grid(row=3, column=1, sticky="w", padx=5)
-        ttk.Label(basic_settings_frame, text="(0=自動)").grid(row=3, column=2, sticky="w")
-        ttk.Label(basic_settings_frame, text="相似度閾值 (%):").grid(row=4, column=0, sticky="w", pady=2)
-        ttk.Scale(basic_settings_frame, from_=80, to=100, orient="horizontal", variable=self.similarity_threshold_var, length=200, command=self._update_threshold_label).grid(row=4, column=1, sticky="w", padx=5)
-        self.threshold_label = ttk.Label(basic_settings_frame, text=""); self.threshold_label.grid(row=4, column=2, sticky="w")
-        ttk.Checkbutton(basic_settings_frame, text="啟用顏色過濾閘 (建議開啟)", variable=self.enable_color_filter_var).grid(row=5, column=0, columnspan=3, sticky="w", pady=5)
-        ttk.Label(basic_settings_frame, text="QR 檢測縮放尺寸:").grid(row=6, column=0, sticky="w", pady=2)
-        ttk.Spinbox(basic_settings_frame, from_=400, to=1600, increment=200, textvariable=self.qr_resize_var, width=5).grid(row=6, column=1, sticky="w", padx=5)
-        ttk.Label(basic_settings_frame, text="px").grid(row=6, column=2, sticky="w")
-        ttk.Label(basic_settings_frame, text="每頁顯示數量:").grid(row=7, column=0, sticky="w", pady=2)
-        self.page_size_combo = ttk.Combobox(basic_settings_frame, textvariable=self.page_size_var, values=['50', '100', '200', '500', '顯示全部'], width=10); self.page_size_combo.grid(row=7, column=1, sticky="w", padx=5)
-        ttk.Label(basic_settings_frame, text="排除資料夾名稱 (換行分隔):").grid(row=8, column=0, sticky="w", pady=2)
-        self.excluded_folders_text = tk.Text(basic_settings_frame, width=40, height=3); self.excluded_folders_text.grid(row=8, column=1, columnspan=2, sticky="ew", padx=5)
-        row_idx += 1
-
-        mode_plugins = {pid: p for pid, p in self.master.plugin_manager.items() if p.get_plugin_type() == 'mode'}
-        preprocessor_plugins = {pid: p for pid, p in self.master.plugin_manager.items() if p.get_plugin_type() == 'preprocessor'}
-
-        mode_frame = ttk.LabelFrame(frame, text="比對模式", padding="10"); mode_frame.grid(row=row_idx, column=0, sticky="nsew", pady=5, padx=5)
-        ttk.Label(mode_frame, text="核心功能:").pack(anchor="w", pady=(0, 2))
-        ttk.Radiobutton(mode_frame, text="廣告比對", variable=self.comparison_mode_var, value="ad_comparison", command=self._update_all_ui_states).pack(anchor="w", padx=10)
-        ttk.Radiobutton(mode_frame, text="互相比對", variable=self.comparison_mode_var, value="mutual_comparison", command=self._update_all_ui_states).pack(anchor="w", padx=10)
-        self.inter_folder_only_cb = ttk.Checkbutton(mode_frame, text="僅比對不同資料夾的圖片", variable=self.enable_inter_folder_only_var, command=self._update_all_ui_states); self.inter_folder_only_cb.pack(anchor="w", padx=30)
-        self.ad_cross_comparison_cb = ttk.Checkbutton(mode_frame, text="[BETA] 智慧標記與廣告庫相似的羣組", variable=self.enable_ad_cross_comparison_var, command=self._update_all_ui_states); self.ad_cross_comparison_cb.pack(anchor="w", padx=30)
-        self.qr_mode_radiobutton = ttk.Radiobutton(mode_frame, text="QR Code 檢測", variable=self.comparison_mode_var, value="qr_detection", command=self._update_all_ui_states); self.qr_mode_radiobutton.pack(anchor="w", padx=10, pady=(8,0))
-        self.qr_hybrid_cb = ttk.Checkbutton(mode_frame, text="啟用廣告庫快速匹配", variable=self.enable_qr_hybrid_var, command=self._update_all_ui_states); self.qr_hybrid_cb.pack(anchor="w", padx=30)
-        if not QR_SCAN_ENABLED: self.qr_mode_radiobutton.config(state=tk.DISABLED); self.qr_hybrid_cb.config(state=tk.DISABLED)
-
-        if mode_plugins:
-            ttk.Separator(mode_frame).pack(fill='x', pady=10)
-            ttk.Label(mode_frame, text="外掛模式:").pack(anchor="w", pady=(0, 2))
-            for plugin_id, plugin in mode_plugins.items():
-                rb = ttk.Radiobutton(mode_frame, text=plugin.get_name(), variable=self.comparison_mode_var, value=plugin_id, command=self._update_all_ui_states)
-                rb.pack(anchor="w", padx=10)
-                if plugin.get_description(): Tooltip(rb, plugin.get_description())
-        
-        cache_time_frame = ttk.LabelFrame(frame, text="快取與篩選", padding="10")
-        cache_time_frame.grid(row=row_idx, column=1, sticky="nsew", pady=5, padx=5)
-        ttk.Button(cache_time_frame, text="清理圖片快取 (回收桶)", command=self._clear_image_cache).pack(anchor="w", pady=2)
-        ttk.Button(cache_time_frame, text="清理資料夾快取 (回收桶)", command=self._clear_folder_cache).pack(anchor="w", pady=2)
-        ttk.Separator(cache_time_frame, orient='horizontal').pack(fill='x', pady=5)
-        time_mode_frame = ttk.Frame(cache_time_frame); time_mode_frame.pack(anchor='w', pady=(5, 5))
-        ttk.Label(time_mode_frame, text="時間篩選基準:").pack(side=tk.LEFT)
-        self.time_mode_combo = ttk.Combobox(time_mode_frame, textvariable=self.folder_time_mode_var, values=['修改時間', '建立時間'], width=12, state="readonly")
-        self.time_mode_combo.pack(side=tk.LEFT, padx=5)
-        Tooltip(self.time_mode_combo, "選擇判斷資料夾是否過期的時間基準。\n修改時間 (mtime): 資料夾內容變更時更新，適合增量掃描。\n建立時間 (ctime): 資料夾被建立時的時間。")
-        self.time_filter_cb = ttk.Checkbutton(cache_time_frame, text="啟用資料夾時間篩選", variable=self.enable_time_filter_var)
-        self.time_filter_cb.pack(anchor="w")
-        time_inputs_frame = ttk.Frame(cache_time_frame); time_inputs_frame.pack(anchor='w', padx=20)
-        ttk.Label(time_inputs_frame, text="從:").grid(row=0, column=0, sticky="w")
-        if DateEntry: self.start_date_entry = DateEntry(time_inputs_frame, textvariable=self.start_date_var, width=12, background='darkblue', foreground='white', borderwidth=2, date_pattern='y-mm-dd')
-        else: self.start_date_entry = ttk.Entry(time_inputs_frame, textvariable=self.start_date_var, width=15)
-        self.start_date_entry.grid(row=0, column=1, sticky="ew")
-        ttk.Label(time_inputs_frame, text="到:").grid(row=1, column=0, sticky="w")
-        if DateEntry: self.end_date_entry = DateEntry(time_inputs_frame, textvariable=self.end_date_var, width=12, background='darkblue', foreground='white', borderwidth=2, date_pattern='y-mm-dd')
-        else: self.end_date_entry = ttk.Entry(time_inputs_frame, textvariable=self.end_date_var, width=15)
-        self.end_date_entry.grid(row=1, column=1, sticky="ew")
-        row_idx += 1
-        
-        if preprocessor_plugins:
-            try:
-                self._main_settings_container = frame
-                self._init_plugin_slot_structures()
-                self._place_preprocessor_plugins()
-            except Exception as e:
-                log_error(f"[SettingsGUI] 外掛 UI 系統初始化失敗: {e}", include_traceback=True)
-
-        self.plugin_frames = {}
-        if mode_plugins:
-            for plugin_id, plugin in mode_plugins.items():
-                plugin_settings_container = ttk.LabelFrame(frame, text=f"{plugin.get_name()} 專屬設定", padding="10")
-                get_frame_func = getattr(plugin, "get_settings_frame", None)
-                if get_frame_func and get_frame_func(plugin_settings_container, self.config, self.plugin_ui_vars):
-                    self.plugin_frames[plugin_id] = plugin_settings_container
-
-        self.plugin_frame_row = row_idx
-        row_idx += 1
-        
-        button_frame = ttk.Frame(frame, padding="10")
-        button_frame.grid(row=row_idx, column=0, columnspan=2, sticky="ew", pady=10)
-        ttk.Button(button_frame, text="保存並關閉", command=self._save_and_close).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(button_frame, text="取消", command=self.destroy).pack(side=tk.RIGHT)
-
-    def _clear_image_cache(self): pass
-    def _clear_folder_cache(self): pass
-
-    def _load_settings_into_gui(self):
-        self.root_scan_folder_entry.insert(0, self.config.get('root_scan_folder', ''))
-        self.ad_folder_entry.insert(0, self.config.get('ad_folder_path', ''))
-        self.extract_count_var.set(str(self.config.get('extract_count', 8)))
-        self.worker_processes_var.set(str(self.config.get('worker_processes', 0)))
-        self.excluded_folders_text.insert(tk.END, "\n".join(self.config.get('excluded_folders', [])))
-        self.similarity_threshold_var.set(self.config.get('similarity_threshold', 95.0))
-        self._update_threshold_label(self.similarity_threshold_var.get())
-        self.enable_extract_count_limit_var.set(self.config.get('enable_extract_count_limit', True))
-        today = datetime.date.today()
-        self.start_date_var.set(self.config.get('start_date_filter') or today.replace(month=1, day=1).strftime("%Y-%m-%d"))
-        self.end_date_var.set(self.config.get('end_date_filter') or today.strftime("%Y-%m-%d"))
-        self.enable_time_filter_var.set(self.config.get('enable_time_filter', False))
-        self.enable_qr_hybrid_var.set(self.config.get('enable_qr_hybrid_mode', True))
-        self.qr_resize_var.set(str(self.config.get('qr_resize_size', 800)))
-        self.enable_inter_folder_only_var.set(self.config.get('enable_inter_folder_only', True))
-        self.enable_ad_cross_comparison_var.set(self.config.get('enable_ad_cross_comparison', True))
-        self.enable_color_filter_var.set(self.config.get('enable_color_filter', True))
-        self.page_size_var.set(str(self.config.get('page_size', 'all')))
-        self.enable_archive_scan_var.set(self.config.get('enable_archive_scan', True))
-        mode = self.config.get('folder_time_mode', 'mtime')
-        self.folder_time_mode_var.set('建立時間' if mode == 'ctime' else '修改時間')
-        
-        # for var_key, var_obj in self.plugin_ui_vars.items():
-            # config_key = var_key.replace('_var', '')
-            # var_obj.set(self.config.get(config_key, False))
-        
-    def _setup_bindings(self):
-        self.comparison_mode_var.trace_add("write", self._update_all_ui_states)
-        self.enable_time_filter_var.trace_add("write", self._toggle_time_filter_fields)
-        self.enable_ad_cross_comparison_var.trace_add("write", self._update_all_ui_states)
-        self.enable_qr_hybrid_var.trace_add("write", self._update_all_ui_states)
-        
-    def _browse_folder(self, entry: ttk.Entry):
-        folder = filedialog.askdirectory(parent=self)
-        if folder: entry.delete(0, tk.END); entry.insert(0, folder)
-        
-    def _update_threshold_label(self, val: float): self.threshold_label.config(text=f"{float(val):.0f}%")
-    
-    def _save_and_close(self):
-        if self._save_settings(): self.destroy()
-        
-    def _save_settings(self) -> bool:
-        try:
-            raw_mode = self.comparison_mode_var.get()
-            comparison_mode = self.mode_key_map_to_internal.get(raw_mode, "mutual_comparison")
-            mode_text = self.folder_time_mode_var.get()
-            folder_time_mode = 'ctime' if mode_text == '建立時間' else 'mtime'
-            config = {
-                'root_scan_folder': self.root_scan_folder_entry.get().strip(),
-                'ad_folder_path': self.ad_folder_entry.get().strip(),
-                'extract_count': int(self.extract_count_var.get()),
-                'worker_processes': int(self.worker_processes_var.get()),
-                'enable_extract_count_limit': self.enable_extract_count_limit_var.get(),
-                'excluded_folders': [f.strip() for f in self.excluded_folders_text.get("1.0", tk.END).splitlines() if f.strip()],
-                'similarity_threshold': float(self.similarity_threshold_var.get()),
-                'comparison_mode': comparison_mode,
-                'enable_time_filter': self.enable_time_filter_var.get(),
-                'start_date_filter': self.start_date_var.get(),
-                'end_date_filter': self.end_date_var.get(),
-                'enable_qr_hybrid_mode': self.enable_qr_hybrid_var.get(),
-                'qr_resize_size': int(self.qr_resize_var.get()),
-                'enable_inter_folder_only': self.enable_inter_folder_only_var.get(),
-                'enable_ad_cross_comparison': self.enable_ad_cross_comparison_var.get(),
-                'page_size': self.page_size_var.get().strip(),
-                'enable_archive_scan': self.enable_archive_scan_var.get(),
-                'enable_color_filter': self.enable_color_filter_var.get(),
-                'folder_time_mode': folder_time_mode,
-            }
-            
-            for var_key, var_obj in self.plugin_ui_vars.items():
-                config_key = var_key.replace('_var', '')
-                if isinstance(var_obj, tk.BooleanVar): config[config_key] = var_obj.get()
-                elif isinstance(var_obj, (tk.StringVar, tk.DoubleVar, tk.IntVar)): config[config_key] = var_obj.get()
-
-            for plugin in self.master.plugin_manager.values():
-                if hasattr(plugin, 'save_settings'):
-                    config = plugin.save_settings(config, self.plugin_ui_vars)
-
-            if not os.path.isdir(config['root_scan_folder']): messagebox.showerror("錯誤", "根掃描資料夾無效！", parent=self); return False
-            if config['enable_time_filter']:
-                try: 
-                    if config['start_date_filter']: datetime.datetime.strptime(config['start_date_filter'], "%Y-%m-%d")
-                    if config['end_date_filter']: datetime.datetime.strptime(config['end_date_filter'], "%Y-%m-%d")
-                except ValueError: messagebox.showerror("錯誤", "日期格式不正確，請使用 YYYY-MM-DD。", parent=self); return False
-            
-            self.master.config.update(config)
-            save_config(self.master.config, CONFIG_FILE)
-            return True
-        except ValueError as e: messagebox.showerror("錯誤", f"數字格式無效: {e}", parent=self); return False
-        except Exception as e: 
-            log_error(f"保存設定時出錯: {e}", True)
-            messagebox.showerror("儲存失敗", f"保存設定時發生未知錯誤:\n{e}", parent=self)
-            return False
+# --- v-MOD: 導入同層級模組 ---
+from .settings_window import SettingsGUI
+from .tooltip import Tooltip
+# --- v-MOD END ---
 
 class MainWindow(tk.Tk):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if Image is None or ImageTk is None: messagebox.showerror("缺少核心依賴", "Pillow 函式庫未安裝或無法載入，程式無法運行。"); self.destroy(); return
-        self.config = load_config(CONFIG_FILE, default_config)
+        
+        # 1. 載入外掛 (在讀取設定之前)
+        self.plugin_manager = {}
+        self._load_plugins()
+
+        # 2. 組合一個包含核心與所有外掛預設值的 `combined_default_config`
+        combined_default_config = default_config.copy()
+        for plugin_id, plugin in self.plugin_manager.items():
+            if hasattr(plugin, "get_default_config"):
+                try:
+                    plugin_defaults = plugin.get_default_config() or {}
+                    # 只合併 config 中不存在的鍵，避免覆蓋使用者已有的設定
+                    for k, v in plugin_defaults.items():
+                        if k not in combined_default_config:
+                            combined_default_config[k] = v
+                except Exception as e:
+                    # 這裡 utils 可能還沒初始化 log，先用 print 或忽略
+                    print(f"[WARN] 讀取外掛 {plugin_id} 預設值失敗: {e}")
+        
+        # 3. 使用合併後的預設值來載入使用者設定檔 `config.json`
+        self.config = load_config(CONFIG_FILE, combined_default_config)
+
         self.pil_img_target = None; self.pil_img_compare = None; self.img_tk_target = None; self.img_tk_compare = None; self._after_id = None
         self.all_found_items, self.all_file_data = [], {}; self.sorted_groups = []
         self.selected_files, self.banned_groups = set(), set(); self.protected_paths = set()
@@ -497,8 +101,7 @@ class MainWindow(tk.Tk):
         self._last_target_src_size: Optional[Tuple[int, int]] = None
         self._last_compare_src_size: Optional[Tuple[int, int]] = None
         self._qr_style = dict(color=(0, 255, 0), alpha=90, outline_thickness=None)
-        self.plugin_manager = {}
-        self._load_plugins()
+        
         self._setup_main_window()
 
     def _load_plugins(self):
@@ -507,12 +110,12 @@ class MainWindow(tk.Tk):
         if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
             base_path = sys._MEIPASS
         else:
-            base_path = os.path.dirname(os.path.abspath(__file__))
+            # 注意：因為 main_window.py 在 gui/ 下，所以要往上一層找
+            base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         plugins_dir = os.path.join(base_path, "plugins")
         if not os.path.isdir(plugins_dir):
-            log_info(f"[插件系統] 在 '{plugins_dir}' 找不到外掛資料夾。")
             return
-        log_info(f"[插件系統] 正在從 '{plugins_dir}' 資料夾加載外掛...")
+        
         for plugin_name in os.listdir(plugins_dir):
             plugin_path = os.path.join(plugins_dir, plugin_name)
             if os.path.isdir(plugin_path) and os.path.isfile(os.path.join(plugin_path, "processor.py")):
@@ -525,9 +128,8 @@ class MainWindow(tk.Tk):
                         if isinstance(cls, type) and issubclass(cls, BasePlugin) and cls is not BasePlugin:
                             instance = cls()
                             self.plugin_manager[instance.get_id()] = instance
-                            log_info(f"  - 已成功加載外掛: '{instance.get_name()}' (ID: {instance.get_id()}, 類型: {instance.get_plugin_type()})")
                 except Exception as e:
-                    log_error(f"加載外掛 '{plugin_name}' 失敗: {e}", include_traceback=True)
+                    print(f"加載外掛 '{plugin_name}' 失敗: {e}")
 
     def deiconify(self):
         super().deiconify()
@@ -1203,88 +805,3 @@ class MainWindow(tk.Tk):
         else:
             self.executor.shutdown(wait=False, cancel_futures=True)
             self.destroy()
-
-# === MODIFICATION START: Updated Plugin API Documentation ===
-"""
-Plugin API (外掛開發者指南)
---------------------------
-前置處理器 (preprocessor) 類型的外掛可以實作以下函式來與主程式的設定 UI (SettingsGUI) 進行更深度的整合。
-所有函式皆為可選，您可以根據需求實作。
-
-新的 UI 系統將所有前置處理器外掛的設定區塊，以堆疊的 LabelFrame 形式呈現在「擴充功能」分頁中。
-
----
-### 可選實作的函式 (Methods)
----
-
-1) get_settings_frame(parent, config, ui_vars) -> ttk.Frame
-   - **(最核心的 UI 函式)** 建立並回傳包含您外掛所有設定元件的容器。
-   - `parent` (ttk.Frame): 您應該將所有 UI 元件（如 Entry, Checkbutton）建立在此容器之內。
-   - `config` (dict): 當前設定的唯讀字典，可用來讀取初始值。
-   - `ui_vars` (dict): 一個共享的字典，用於存放 Tkinter 變數 (例如 tk.StringVar, tk.BooleanVar)。
-     強烈建議將您的 Tkinter 變數存入此字典，以便主程式和 `save_settings` 函式可以存取。
-   - **回傳值**: 包含所有設定元件的 ttk.Frame。您 **不應該** 對回傳的 frame 呼叫 `.pack()` 或 `.grid()`。
-
-2) save_settings(config, ui_vars) -> dict
-   - 在使用者點擊「保存並關閉」時被呼叫。
-   - **職責**: 從 `ui_vars` 字典中讀取您外掛的 Tkinter 變數值，更新 `config` 字典，最後回傳更新後的 `config`。
-   - **範例**: `config['your_setting_key'] = ui_vars['your_tk_var_key'].get()`
-
-3) plugin_prefers_inner_enable() -> bool
-   - **(管理啟用狀態的關鍵)** 告知主程式，您的外掛是否會自行管理「啟用」狀態。
-   - **回傳 `True`**:
-     - 主程式 **不會** 為您的外掛自動產生一個外層的「啟用 XXX」勾選框。
-     - 您 **必須** 在 `get_settings_frame` 中自行建立一個啟用勾選框。
-     - 當此勾選框被取消時，主程式只會隱藏您設定區塊的 **內部元件**，保留標題和啟用框本身，方便使用者重新啟用。
-   - **回傳 `False` (預設)**:
-     - 主程式會自動為您的設定區塊加上一個「啟用 XXX」勾選框。
-     - 當此勾選框被取消時，您的 **整個設定區塊** (包含標題) 都會被隱藏。
-
-4) get_slot_order() -> int
-   - 定義您外掛設定區塊在「擴充功能」頁面中的顯示順序。數值越小，顯示位置越靠上。
-   - 預設值: 999 (排在最後)。
-
-5) get_tab_label() -> str
-   - 自訂您設定區塊 (LabelFrame) 的標題文字。
-   - 如果未實作，預設使用 `get_name()` 的回傳值。
-
----
-### 最佳實踐：如何整合「自行啟用」功能
----
-
-如果您希望對啟用流程有更精細的控制（例如，啟用時才顯示某些元件），請遵循以下步驟：
-
-1.  **宣告**: 在您的外掛 Processor 類別中，實作 `plugin_prefers_inner_enable` 並回傳 `True`。
-    ```python
-    def plugin_prefers_inner_enable(self):
-        return True
-    ```
-
-2.  **建立共用變數**: 在 `get_settings_frame` 中，使用標準化的鍵名 `f"enable_{plugin_id}"` 來從 `ui_vars` 存取或建立 `tk.BooleanVar`。這確保了主程式和您的外掛操作的是同一個變數。
-    ```python
-    # 在 get_settings_frame 中
-    plugin_id = "your_plugin_id"
-    enable_key = f"enable_{plugin_id}"
-    
-    enable_var = ui_vars.get(enable_key)
-    if not isinstance(enable_var, tk.BooleanVar):
-        initial_value = config.get(enable_key, False)
-        enable_var = tk.BooleanVar(value=initial_value)
-        ui_vars[enable_key] = enable_var
-    
-    # 建立您自己的啟用勾選框，並綁定到 enable_var
-    chk_enable = ttk.Checkbutton(parent, text="啟用我的酷炫功能", variable=enable_var)
-    chk_enable.pack(...)
-    ```
-
-3.  **保存狀態**: 在 `save_settings` 中，使用相同的標準鍵名來讀取變數並更新 `config`。
-    ```python
-    # 在 save_settings 中
-    plugin_id = "your_plugin_id"
-    enable_key = f"enable_{plugin_id}"
-    if enable_key in ui_vars:
-        config[enable_key] = ui_vars[enable_key].get()
-    return config
-    ```
-"""
-# === MODIFICATION END ===

@@ -1,106 +1,100 @@
-好的，完全理解。我們需要一份更新到 `v15.0.0` 的、專業且清晰的打包指引文件，以反映專案模組化後的新結構 (`src` 目錄) 和新的依賴（外掛系統）。
+這是一份針對 **v16.0.2** 架構優化後的打包指引。
 
-我已經為您仿造 `v14.x` 的風格，撰寫了一份全新的 `打包py到exe指引.md`。這份文件不僅更新了指令，更重要的是**更新了整個操作流程**，以適應您現在更專業的專案結構。
+由於我們引入了 `gui/` 資料夾、新的外掛依賴 (`pyautogui`, `pyperclip` 等) 以及 SQLite，打包指令需要做相應的調整。為了盡量縮小體積，我保留了排除大型未用庫的參數，並加入了 UPX 壓縮建議。
 
-您可以直接用以下內容覆蓋掉舊的 `打包py到exe指引.md` 檔案。
+### ComicTailCleaner 專案打包指引 (v16.0.2)
+
+**文件目的**: 將 Python 專案打包成單一 Windows 可執行檔 (.exe)，並透過參數優化檔案體積。
 
 ---
 
-### **ComicTailCleaner 專案建置說明 (v15.0.0)**
+### 一、前置準備 (最重要的一步)
 
-**文件目的**: 本文件旨在提供將 `ComicTailCleaner` v15.0.0 Python 專案打包成 Windows 可執行檔 (.exe) 的標準化流程。本文檔中的命令已針對新的模組化架構 (`app.py` 入口) 和外掛系統 (`plugins` 資料夾) 進行了特別調校。
+為了避免打包進系統中不相關的雜物（這是 EXE 肥大的主因），強烈建議使用 **乾淨的虛擬環境 (Virtual Environment)**。
 
-#### **一、前置準備**
-
-在執行打包命令前，請務必確保滿足以下條件：
-
-1.  **安裝 PyInstaller**: 您的 Python 環境中已安裝 `pyinstaller`。
-    ```cmd
-    pip install pyinstaller
+1.  **建立虛擬環境**:
+    ```bash
+    python -m venv venv
     ```
-2.  **安裝所有依賴**: 專案所需的所有 Python 套件皆已安裝 (`Pillow`, `imagehash`, `opencv-python`, `numpy`, `scipy`, `send2trash`, `psutil`, `rarfile` 等)。
-
-3.  **準備必要檔案 (重要)**:
-    與舊版不同，所有必要的原始碼與資源檔案現在都應統一放置在 `src` 資料夾內。打包前，請確認您的 `src` 資料夾結構如下：
+2.  **進入虛擬環境**:
+    ```bash
+    venv\Scripts\activate
     ```
-    src/
-    ├── app.py                 # 主程式入口
-    ├── gui.py
-    ├── core_engine.py
+3.  **只安裝必要套件** (這一步決定了體積大小):
+    ```bash
+    pip install pyinstaller pillow imagehash opencv-python numpy send2trash psutil pyautogui pyperclip tkcalendar nanoid rarfile
+    ```
+    *(注意：不要安裝 pandas, matplotlib 等沒用到的巨型套件)*
+
+4.  **準備檔案結構**:
+    請將所有要打包的檔案放在同一個資料夾（例如 `build_dir`），結構應如下：
+    ```text
+    build_dir/
+    ├── app.py               (程式入口)
     ├── config.py
     ├── utils.py
+    ├── core_engine.py
     ├── archive_handler.py
-    ├── plugins/               # 完整的外掛資料夾
-    │   └── ...
-    ├── processors/            # 完整的處理器資料夾
-    │   └── ...
-    ├── config.json            # 乾淨的預設設定檔
-    ├── UnRAR.exe              # RAR 支援工具
-    ├── icon.ico               # (建議) 應用程式圖示
-    └── upx.exe                # (建議) UPX 壓縮工具
+    ├── dependency_manager.py
+    ├── gui/                 (GUI 模組資料夾)
+    ├── core/                (如果有的話)
+    ├── plugins/             (外掛資料夾)
+    ├── processors/          (處理器資料夾)
+    ├── UnRAR.exe            (必要工具)
+    ├── icon.ico             (圖示)
+    └── upx.exe              (推薦：放入 UPX 壓縮工具可減少約 30% 體積)
     ```
 
-#### **二、打包命令**
+---
 
-本版本推薦使用**單檔案模式 (One-File)**，以方便使用者分發。
+### 二、打包命令 (優化版)
 
-##### **建議指令 (單檔案模式)**
+請在終端機切換到上述目錄，然後執行以下指令。
 
-```cmd
-pyinstaller --noconfirm --clean --windowed --onefile --upx-dir="." --icon="icon.ico" --add-data "plugins;plugins" --add-data "config.json;." --add-data "UnRAR.exe;." --hidden-import="pkg_resources.py2_warn" --hidden-import="psutil" --hidden-import="send2trash" --hidden-import="imagehash" --hidden-import="cv2" --hidden-import="numpy" --hidden-import="scipy" --hidden-import="pywt" --hidden-import="rarfile" --collect-all="imagehash" --collect-all="pywt" --exclude-module="PyQt5" --exclude-module="PySide2" --exclude-module="wx" --exclude-module="matplotlib" --exclude-module="pandas" --exclude-module="torch" --exclude-module="tensorflow" "app.py"
+#### 📋 單行版本 (直接複製貼上)
+
+```bash
+pyinstaller --noconfirm --clean --windowed --onefile --upx-dir="." --icon="icon.ico" --add-data "plugins;plugins" --add-data "UnRAR.exe;." --hidden-import="gui" --hidden-import="processors" --hidden-import="plugins" --hidden-import="sqlite3" --hidden-import="pyautogui" --hidden-import="pyperclip" --hidden-import="tkcalendar" --collect-all="imagehash" --exclude-module="matplotlib" --exclude-module="pandas" --exclude-module="scipy.stats" --exclude-module="notebook" --exclude-module="test" --exclude-module="setuptools" "app.py"
 ```
 
-**多行版本 (方便閱讀)**
+#### 📝 多行解析版 (了解細節)
+
 ```bash
 pyinstaller --noconfirm --clean --windowed --onefile ^
- --upx-dir="." ^
- --icon="icon.ico" ^
- --add-data "plugins;plugins" ^
- --add-data "config.json;." ^
- --add-data "UnRAR.exe;." ^
- --hidden-import="pkg_resources.py2_warn" ^
- --hidden-import="psutil" ^
- --hidden-import="send2trash" ^
- --hidden-import="imagehash" ^
- --hidden-import="cv2" ^
- --hidden-import="numpy" ^
- --hidden-import="scipy" ^
- --hidden-import="pywt" ^
- --hidden-import="rarfile" ^
- --collect-all="imagehash" ^
- --collect-all="pywt" ^
- --exclude-module="PyQt5" ^
- --exclude-module="PySide2" ^
- --exclude-module="wx" ^
- --exclude-module="matplotlib" ^
- --exclude-module="pandas" ^
- --exclude-module="torch" ^
- --exclude-module="tensorflow" ^
+ --upx-dir="." ^                         # 使用 UPX 壓縮 (需下載 upx.exe 放同目錄)
+ --icon="icon.ico" ^                     # 設定圖示
+ --add-data "plugins;plugins" ^          # 核心：將外掛資料夾完整打包，包含圖片素材
+ --add-data "UnRAR.exe;." ^              # 核心：支援 RAR/CBR
+ --hidden-import="gui" ^                 # 新增：確保掃描到 gui 套件
+ --hidden-import="processors" ^          # 新增：確保掃描到 processors 套件
+ --hidden-import="sqlite3" ^             # 新增：v16 核心改用 SQLite
+ --hidden-import="pyautogui" ^           # 新增：EH 外掛依賴
+ --hidden-import="pyperclip" ^           # 新增：EH 外掛依賴
+ --hidden-import="tkcalendar" ^          # 新增：日期選擇器
+ --collect-all="imagehash" ^             # 強制收集 imagehash 及其依賴 (如 pywt)
+ --exclude-module="matplotlib" ^         # 排除肥大且未使用的庫
+ --exclude-module="pandas" ^             # 排除肥大且未使用的庫
+ --exclude-module="scipy.stats" ^        # 排除部分 scipy 模組 (imagehash 只需部分 scipy)
+ --exclude-module="notebook" ^           # 排除 Jupyter 相關垃圾
+ --exclude-module="setuptools" ^         # 排除開發工具
  "app.py"
 ```
 
 ---
 
-#### **三、關鍵參數詳解**
+### 三、常見問題與注意事項
 
-*   `--onefile`: 將所有內容打包成一個獨立的 EXE 檔案。
-*   `--windowed`: 指定這是一個圖形化介面 (GUI) 程式，執行時不顯示命令列視窗。
-*   `--upx-dir="."`: 使用位於當前目錄的 UPX 工具壓縮最終的 EXE 檔案以減小體積。
-*   `--icon="icon.ico"`: 為產生的 EXE 檔案指定圖示。
-*   `--add-data "plugins;plugins"`: **(關鍵新增)** 將整個 `plugins` 資料夾及其所有內容打包進去。這是確保外掛功能在 `.exe` 中正常運作的核心。
-*   `--add-data "config.json;."`: 將預設的 `config.json` 檔案打包進去。
-*   `--add-data "UnRAR.exe;."`: 將 `UnRAR.exe` 工具打包進去，以支援 RAR/CBR 格式。
-*   `--hidden-import=...`: 手動告知 PyInstaller 有哪些它未能自動偵測到的「隱藏導入」模組。
-*   `--collect-all=...`: 以最強力的方式，完整收集一個模組所有相關的子模組、數據檔案等。
-*   `--exclude-module=...`: 明確排除我們未使用的大型函式庫，這是**減小檔案體積的最有效手段**。
-*   `"app.py"`: 指定 `app.py` 作為程式的入口點。
+1.  **關於設定檔 (`config.json`)**：
+    *   新版程式 (`v16.0.2`) 具備強大的預設值生成能力。**不建議**打包 `config.json` 進去。
+    *   讓程式在使用者電腦第一次執行時自動生成 `data/config.json`，這樣最乾淨，也不會覆蓋使用者的設定。
 
-#### **四、使用流程**
+2.  **關於 `pyautogui` 與圖示識別**：
+    *   指令中的 `--add-data "plugins;plugins"` 至關重要。它確保了 `plugins/eh_database_tools/assets/` 下的按鈕截圖被正確打包。如果沒加這行，自動化功能會失效。
 
-1.  **準備檔案**: 按照「一、前置準備」中的說明，將所有必要的檔案和資料夾整理到 `src` 目錄下。
-2.  **打開終端機**: 在檔案總管中，進入 `src` 資料夾。在路徑欄輸入 `cmd` 並按 Enter，即可在當前目錄打開命令提示字元。
-3.  **執行命令**: 複製「二、打包命令」中的**單行版本**指令，貼到命令提示字元視窗中，然後按 Enter 執行。
-4.  **獲取成品**: 打包成功後，在 `src` 資料夾內會出現一個 `dist` 資料夾。您需要的 `app.exe` 檔案就在其中。
+3.  **防毒軟體誤報**：
+    *   使用 `--onefile` (單檔案) + `UPX` 壓縮的 EXE 很容易被 Windows Defender 誤判為病毒。
+    *   **解決方案**：如果只是自己用，沒關係。如果要發布給別人，建議拿掉 `--upx-dir="."` 參數，體積會變大一點，但被誤殺機率降低。
 
----
-**備註**: 舊版指引中的「標準化命名」步驟已不再需要，因為我們現在有了穩定且統一的 `app.py` 入口點。
+4.  **關於 `dependency_manager.py`**：
+    *   這個檔案是用來檢查開發環境的。打包後的 EXE 不需要它運作（`app.py` 裡有判斷 `frozen` 狀態會跳過檢查），但 PyInstaller 會自動把它包進去，這無傷大雅。
+

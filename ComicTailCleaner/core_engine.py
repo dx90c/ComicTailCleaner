@@ -1,7 +1,7 @@
 # ======================================================================
 # 檔案名稱：core_engine.py
 # 模組目的：包含核心的比对引擎與增量更新邏輯
-# 版本：2.4.6 (Hotfix: 補全對 scanner 模組輔助函式的導入)
+# 版本：2.5.0 (API重構：新增 compute_phashes 公開方法供外掛調用)
 # ======================================================================
 
 import os
@@ -67,7 +67,7 @@ except ImportError:
 # ======================================================================
 # Section: 全局常量
 # ======================================================================
-ENGINE_VERSION = "2.4.6"
+ENGINE_VERSION = "2.5.0"
 HASH_BITS = 64
 PHASH_FAST_THRESH   = 0.80
 PHASH_STRICT_SKIP   = 0.93
@@ -96,7 +96,46 @@ class ImageComparisonEngine:
         self.total_task_count = 0; self.completed_task_count = 0; self.failed_tasks = []
         self.vpath_size_map = {}
         self.quarantine_list = set()
+        # --- v-MOD: 實例化主掃描快取和廣告庫快取 ---
+        self.scan_cache_manager = ScannedImageCacheManager(self.config.get('root_scan_folder'))
+        ad_folder = self.config.get('ad_folder_path')
+        self.ad_cache_manager = ScannedImageCacheManager(ad_folder) if ad_folder and os.path.isdir(ad_folder) else None
+        # --- v-MOD END ---
         log_performance("[初始化] 掃描引擎實例")
+
+    # --- v-MOD START: 新增公開 API ---
+    def compute_phashes(self,
+                        paths: List[str],
+                        cache_manager: ScannedImageCacheManager,
+                        label: str = "圖片指紋",
+                        progress_scope: str = "global"
+                        ) -> Tuple[bool, Dict[str, Any]]:
+        """
+        【公開API】計算一批圖片的 pHash，並利用快取。
+        這是提供給外掛使用的穩定接口。
+        
+        Args:
+            paths: 待處理的圖片路徑列表。
+            cache_manager: 用於讀寫快取的 ScannedImageCacheManager 實例。
+            label: 顯示在進度條上的任務標籤。
+            progress_scope: 進度條更新範圍 ('global' 或 'local')。
+            
+        Returns:
+            一個元組 (continue_processing, file_data)，表示是否應繼續及處理結果。
+        """
+        # 為了避免循環導入，在方法內部 import
+        from processors.qr_engine import _pool_worker_process_image_phash_only
+        
+        cont, data = self._process_images_with_cache(
+            paths,
+            cache_manager,
+            label,
+            _pool_worker_process_image_phash_only,
+            'phash',
+            progress_scope=progress_scope
+        )
+        return cont, data
+    # --- v-MOD END ---
         
     def _check_control(self) -> str:
         if self.control_events:
@@ -196,10 +235,7 @@ class ImageComparisonEngine:
             if mode == 'ad_comparison' or (mode == 'mutual_comparison' and self.config.get('enable_ad_cross_comparison')):
                 ad_catalog_state = self._prepare_ad_catalog_state()
             
-            root_scan_folder = self.config.get('root_scan_folder')
-            ad_folder_path = self.config.get('ad_folder_path')
-            
-            scan_cache_manager = ScannedImageCacheManager(root_scan_folder)
+            scan_cache_manager = self.scan_cache_manager # 使用實例變數
             
             try:
                 mode_map = { "ad_comparison": "廣告比對", "mutual_comparison": "互相比對", "qr_detection": "QR Code 檢測" }

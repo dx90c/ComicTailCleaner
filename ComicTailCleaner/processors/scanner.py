@@ -1,17 +1,18 @@
 # ======================================================================
 # 檔案名稱：processors/scanner.py
-# 模組目的：提供统一的文件扫描、缓存管理及多进程 workers
-# 版本：2.2.0 (穩定性更新：修正冷啟動問題與保底掃描邏輯)
+# 模組目的：提供統一的文件掃描、SQLite 緩存管理及多進程 workers
+# 版本：3.0.1 (Hotfix: 修正 remove_folders 中的 CACHE_LOCK 死結問題)
 # ======================================================================
 
 import os
 import datetime
+import json
+import time
+import sqlite3
+import re
 from collections import deque, defaultdict
 from queue import Queue
 from typing import Union, Tuple, Dict, List, Set, Optional, Generator, Any
-import re
-import json
-import time
 
 # --- 第三方庫 ---
 try:
@@ -49,16 +50,13 @@ except ImportError:
     ARCHIVE_SUPPORT_ENABLED = False
     
 # === 版本常數 ===
-SCANNER_ENGINE_VERSION = "2.2.0"
+SCANNER_ENGINE_VERSION = "3.0.1"
 
 # --- 全域設定讀取 ---
-DEFAULT_IMG_FLUSH_THRESHOLD = int(getattr(config, "CACHE_FLUSH_THRESHOLD", 
-                                          getattr(config, "default_config", {}).get("cache_flush_threshold", 10000)))
+DEFAULT_IMG_FLUSH_THRESHOLD = 1000
+DEFAULT_FOLDER_FLUSH_THRESHOLD = 200
 
-DEFAULT_FOLDER_FLUSH_THRESHOLD = int(getattr(config, "FOLDER_FLUSH_THRESHOLD", 
-                                             getattr(config, "default_config", {}).get("folder_flush_threshold", 500)))
-
-# --- 掃描輔助函式 (保持不變) ---
+# --- 掃描輔助函式 ---
 def _natural_sort_key(s: str) -> list:
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'([0-9]+)', s)]
 
@@ -129,7 +127,7 @@ def _iter_scandir_time_pruned(root_path: str, excluded_paths: set, excluded_name
             continue
 
 
-# === 多進程 Worker 函式 (保持不變) ===
+# === 多進程 Worker 函式 ===
 def _detect_qr_on_image(img) -> Union[list, None]:
     if cv2 is None or np is None: return None
     try:
@@ -191,210 +189,262 @@ def _pool_worker_process_image_phash_only(payload: Union[str, tuple]) -> tuple[s
         error_path = image_path if image_path else str(payload)
         return (error_path, {'error': f"處理 pHash 失敗: {e}"})
 
-# === 快取管理類 (保持不變) ===
-class ScannedImageCacheManager:
+
+# === SQLite 快取基類 ===
+class SQLiteCacheBase:
+    """提供通用的 SQLite 操作基礎"""
+    def __init__(self, db_path: str, table_name: str):
+        self.db_path = db_path
+        self.table_name = table_name
+        self.conn = self._init_db()
+        self._pending_updates = {}
+        self.flush_threshold = 1000
+        
+    def _init_db(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        # 啟用 WAL 模式以提升並發性能
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute(f"CREATE TABLE IF NOT EXISTS {self.table_name} (path TEXT PRIMARY KEY, data TEXT)")
+        conn.commit()
+        return conn
+
+    def _serialize(self, data: dict) -> str:
+        serializable = data.copy()
+        if imagehash:
+            for k in ['phash', 'whash']:
+                if k in serializable and isinstance(serializable[k], imagehash.ImageHash):
+                    serializable[k] = str(serializable[k])
+        if 'avg_hsv' in serializable and isinstance(serializable['avg_hsv'], tuple):
+            serializable['avg_hsv'] = list(serializable['avg_hsv'])
+        return json.dumps(serializable)
+
+    def _deserialize(self, json_str: str) -> dict:
+        try:
+            data = json.loads(json_str)
+            if imagehash:
+                for k in ['phash', 'whash']:
+                    if k in data and data[k] and isinstance(data[k], str):
+                        try: data[k] = imagehash.hex_to_hash(data[k])
+                        except ValueError: data[k] = None
+            if 'avg_hsv' in data and isinstance(data['avg_hsv'], list):
+                try: data['avg_hsv'] = tuple(float(x) for x in data['avg_hsv'])
+                except ValueError: data[k] = None
+            return data
+        except (json.JSONDecodeError, TypeError):
+            return {}
+
+    def get_data(self, path: str) -> Union[dict, None]:
+        key = _norm_key(path)
+        if key in self._pending_updates:
+            return self._pending_updates[key]
+        
+        try:
+            cursor = self.conn.execute(f"SELECT data FROM {self.table_name} WHERE path=?", (key,))
+            row = cursor.fetchone()
+            if row:
+                return self._deserialize(row[0])
+        except sqlite3.Error as e:
+            log_error(f"SQLite 讀取錯誤: {e}")
+        return None
+
+    def update_data(self, path: str, data: dict):
+        if not data or 'error' in data: return
+        key = _norm_key(path)
+        
+        current = self.get_data(key) or {}
+        current.update(data)
+        
+        self._pending_updates[key] = current
+        
+        if len(self._pending_updates) >= self.flush_threshold:
+            self.save_cache()
+
+    def save_cache(self):
+        if not self._pending_updates: return
+        with CACHE_LOCK:
+            try:
+                items = [(k, self._serialize(v)) for k, v in self._pending_updates.items()]
+                self.conn.executemany(f"INSERT OR REPLACE INTO {self.table_name} (path, data) VALUES (?, ?)", items)
+                self.conn.commit()
+                self._pending_updates.clear()
+            except sqlite3.Error as e:
+                log_error(f"SQLite 寫入錯誤: {e}")
+
+    def remove_data(self, path: str) -> bool:
+        key = _norm_key(path)
+        if key in self._pending_updates:
+            del self._pending_updates[key]
+        
+        try:
+            with CACHE_LOCK:
+                self.conn.execute(f"DELETE FROM {self.table_name} WHERE path=?", (key,))
+                self.conn.commit()
+            return True
+        except sqlite3.Error:
+            return False
+
+    def remove_prefix(self, prefix: str):
+        prefix_norm = _norm_key(prefix)
+        keys_to_del = [k for k in self._pending_updates if k.startswith(prefix_norm)]
+        for k in keys_to_del:
+            del self._pending_updates[k]
+            
+        try:
+            with CACHE_LOCK:
+                pattern = prefix_norm + "%"
+                self.conn.execute(f"DELETE FROM {self.table_name} WHERE path LIKE ?", (pattern,))
+                self.conn.commit()
+        except sqlite3.Error as e:
+            log_error(f"SQLite 批量刪除錯誤: {e}")
+
+    def close(self):
+        self.save_cache()
+        self.conn.close()
+
+# === 具體快取管理類 (SQLite 版) ===
+
+class ScannedImageCacheManager(SQLiteCacheBase):
     def __init__(self, root_scan_folder: str):
         sanitized_root = _sanitize_path_for_filename(root_scan_folder)
         base_name = f"scanned_hashes_cache_{sanitized_root}"
-        
         from config import DATA_DIR
-        self.cache_file_path = os.path.join(DATA_DIR, f"{base_name}.json")
-        counter = 1
-        norm_root = _norm_key(root_scan_folder)
-        while os.path.exists(self.cache_file_path):
-            try:
-                with open(self.cache_file_path, 'r', encoding='utf-8') as f: data = json.load(f)
-                images_data = data.get('images', data)
-                first_key = next(iter(images_data), None)
-                if not first_key or _norm_key(first_key).startswith(norm_root): break
-            except (json.JSONDecodeError, StopIteration, TypeError, AttributeError): break
-            self.cache_file_path = f"{base_name}_{counter}.json"; counter += 1
-            if counter > 10: log_error("圖片快取檔名衝突過多。"); break
         
-        self.cache = self._load_cache()
-        self._dirty_count = 0
+        db_path = os.path.join(DATA_DIR, f"{base_name}.db")
+        json_path_legacy = os.path.join(DATA_DIR, f"{base_name}.json")
+        
+        super().__init__(db_path, "images")
         self.flush_threshold = DEFAULT_IMG_FLUSH_THRESHOLD
+        self.cache_file_path = db_path
 
-        log_info(f"[快取] 圖片快取已初始化: '{self.cache_file_path}' (批次寫入閾值: {self.flush_threshold})")
+        if not os.path.exists(db_path) or self._is_db_empty():
+            if os.path.exists(json_path_legacy):
+                self._migrate_from_json(json_path_legacy)
         
-    def _normalize_loaded_data(self, data: dict) -> dict:
-        converted_data = data.copy()
-        if imagehash:
-            for key in ['phash', 'whash']:
-                if key in converted_data and converted_data[key] and not isinstance(converted_data[key], imagehash.ImageHash):
-                    try: converted_data[key] = imagehash.hex_to_hash(str(converted_data[key]))
-                    except (TypeError, ValueError): converted_data[key] = None
-        if 'avg_hsv' in converted_data and isinstance(converted_data['avg_hsv'], list):
-            try: converted_data['avg_hsv'] = tuple(float(x) for x in converted_data['avg_hsv'])
-            except (ValueError, TypeError): converted_data['avg_hsv'] = None
-        return converted_data
+        log_info(f"[快取] SQLite 圖片快取已就緒: '{self.cache_file_path}'")
 
-    def _load_cache(self) -> dict:
-        if not os.path.exists(self.cache_file_path): return {}
+    def _is_db_empty(self) -> bool:
         try:
-            with open(self.cache_file_path, 'r', encoding='utf-8') as f: loaded_data = json.load(f)
-            if not isinstance(loaded_data, dict): return {}
-            loaded_images = loaded_data.get('images', loaded_data)
-            if not isinstance(loaded_images, dict): return {}
-            converted_cache = {}
-            for path, data in loaded_images.items():
-                norm_path = _norm_key(path)
-                if isinstance(data, dict): converted_cache[norm_path] = self._normalize_loaded_data(data)
-            log_info(f"圖片快取 '{self.cache_file_path}' 已成功載入 {len(converted_cache)} 筆。")
-            return converted_cache
-        except (json.JSONDecodeError, Exception) as e:
-            log_info(f"圖片快取檔案 '{self.cache_file_path}' 格式不正確或讀取失敗 ({e})，將重建。")
-            return {}
+            return self.conn.execute("SELECT COUNT(*) FROM images").fetchone()[0] == 0
+        except sqlite3.Error:
+            return True
 
-    def save_cache(self) -> None:
-        with CACHE_LOCK:
-            if self._dirty_count == 0 and os.path.exists(self.cache_file_path):
-                return
-            serializable_cache = {}
-            for path, data in self.cache.items():
-                if data:
-                    serializable_data = {k: str(v) if imagehash and isinstance(v, imagehash.ImageHash) else v for k, v in data.items()}
-                    if 'avg_hsv' in serializable_data and isinstance(serializable_data['avg_hsv'], tuple):
-                        serializable_data['avg_hsv'] = list(serializable_data['avg_hsv'])
-                    serializable_cache[path] = serializable_data
-            final_output = {"version": 3, "images": serializable_cache}
-            try:
-                temp_file_path = self.cache_file_path + f".tmp{os.getpid()}"
-                with open(temp_file_path, 'w', encoding='utf-8') as f: json.dump(final_output, f, indent=2)
-                os.replace(temp_file_path, self.cache_file_path)
-                log_info(f"[快取] {self._dirty_count} 筆圖片快取變更已寫入 '{self.cache_file_path}'")
-                self._dirty_count = 0
-            except (IOError, OSError) as e: log_error(f"保存圖片快取失敗: {e}", True)
-
-    def get_data(self, file_path: str) -> Union[dict, None]: 
-        return self.cache.get(_norm_key(file_path))
-
-    def update_data(self, file_path: str, data: dict) -> None:
-        if data and 'error' not in data:
-            key = _norm_key(file_path)
-            self.cache[key] = {**self.cache.get(key, {}), **data}
-            self._dirty_count += 1
-            if self._dirty_count >= self.flush_threshold:
-                self.save_cache()
-
-    def remove_data(self, file_path: str) -> bool:
-        with CACHE_LOCK:
-            key = _norm_key(file_path)
-            if key in self.cache:
-                del self.cache[key]
-                self._dirty_count += 1
-                if self._dirty_count >= self.flush_threshold:
-                    self.save_cache()
-                return True
-            return False
+    def _migrate_from_json(self, json_path: str):
+        log_info(f"[遷移] 偵測到舊版 JSON 快取 '{json_path}'，正在遷移至 SQLite...")
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                images = data.get('images', data)
+                
+            if images:
+                items = []
+                for path, meta in images.items():
+                    norm_p = _norm_key(path)
+                    items.append((norm_p, json.dumps(meta)))
+                
+                with CACHE_LOCK:
+                    self.conn.executemany("INSERT OR REPLACE INTO images (path, data) VALUES (?, ?)", items)
+                    self.conn.commit()
+                log_info(f"[遷移] 成功遷移 {len(items)} 筆資料。")
+                try: os.rename(json_path, json_path + ".bak")
+                except OSError: pass
+                
+        except Exception as e:
+            log_error(f"[遷移] 遷移失敗: {e}", True)
 
     def remove_entries_from_folder(self, folder_path: str) -> int:
-        with CACHE_LOCK:
-            folder_norm = _norm_key(folder_path) + os.sep
-            keys = [k for k in self.cache if k.startswith(folder_norm)]
-            if keys:
-                for k in keys:
-                    del self.cache[k]
-                self._dirty_count += len(keys)
-                log_info(f"[快取清理] 已從圖片快取中標記移除 '{folder_path}' 的 {len(keys)} 個條目。")
-                if self._dirty_count >= self.flush_threshold:
-                    self.save_cache()
-            return len(keys)
+        self.remove_prefix(folder_path)
+        return 0 
 
     def invalidate_cache(self) -> None:
-        if send2trash is None: log_error("無法清理快取，因為 'send2trash' 模組未安裝。"); return
-        with CACHE_LOCK:
-            self.cache = {}
-            self._dirty_count = 0
-            if os.path.exists(self.cache_file_path):
-                try: 
-                    log_info(f"[快取清理] 準備將圖片快取檔案 '{self.cache_file_path}' 移至回收桶。")
-                    send2trash.send2trash(self.cache_file_path)
-                except Exception as e: log_error(f"刪除圖片快取檔案時發生錯誤: {e}", True)
+        if send2trash is None: return
+        self.close()
+        if os.path.exists(self.db_path):
+            try: send2trash.send2trash(self.db_path)
+            except Exception: pass
+        self.conn = self._init_db()
 
-class FolderStateCacheManager:
+
+class FolderStateCacheManager(SQLiteCacheBase):
     def __init__(self, root_scan_folder: str):
         sanitized_root = _sanitize_path_for_filename(root_scan_folder)
         base_name = f"folder_state_cache_{sanitized_root}"
-        
         from config import DATA_DIR
-        self.cache_file_path = os.path.join(DATA_DIR, f"{base_name}.json")
-        norm_root = _norm_key(root_scan_folder)
-        counter = 1
-        while os.path.exists(self.cache_file_path):
-            try:
-                with open(self.cache_file_path, 'r', encoding='utf-8') as f: data = json.load(f)
-                first_key = next(iter(data), None)
-                if not first_key or _norm_key(first_key).startswith(norm_root): break
-            except (json.JSONDecodeError, StopIteration, TypeError, AttributeError): break
-            self.cache_file_path = f"{base_name}_{counter}.json"; counter += 1
-            if counter > 10: log_error("資料夾快取檔名衝突過多。"); break
-        self.cache = self._load_cache()
-        self._dirty_count = 0
+        
+        db_path = os.path.join(DATA_DIR, f"{base_name}.db")
+        json_path_legacy = os.path.join(DATA_DIR, f"{base_name}.json")
+
+        super().__init__(db_path, "folders")
         self.flush_threshold = DEFAULT_FOLDER_FLUSH_THRESHOLD
+        self.cache_file_path = db_path
 
-        log_info(f"[快取] 資料夾快取已初始化: '{self.cache_file_path}' (批次寫入閾值: {self.flush_threshold})")
+        if not os.path.exists(db_path) or self._is_db_empty():
+            if os.path.exists(json_path_legacy):
+                self._migrate_from_json(json_path_legacy)
 
-    def _load_cache(self) -> dict:
-        if not os.path.exists(self.cache_file_path): return {}
+        log_info(f"[快取] SQLite 資料夾快取已就緒: '{self.cache_file_path}'")
+        
+    def _is_db_empty(self) -> bool:
+        try: return self.conn.execute("SELECT COUNT(*) FROM folders").fetchone()[0] == 0
+        except: return True
+
+    def _migrate_from_json(self, json_path: str):
         try:
-            with open(self.cache_file_path, 'r', encoding='utf-8') as f: loaded_cache = json.load(f)
-            if not isinstance(loaded_cache, dict): return {}
-            converted_cache = {}
-            for path, state in loaded_cache.items():
-                norm_path = _norm_key(path)
-                if isinstance(state, dict) and 'mtime' in state: converted_cache[norm_path] = state
-            log_info(f"資料夾狀態快取 '{self.cache_file_path}' 已成功載入 {len(converted_cache)} 筆。")
-            return converted_cache
-        except Exception as e:
-            log_error(f"載入資料夾狀態快取時發生錯誤: {e}", True); return {}
-            
-    def save_cache(self) -> None:
-        with CACHE_LOCK:
-            if self._dirty_count == 0 and os.path.exists(self.cache_file_path):
-                return
-            try:
-                temp_file_path = self.cache_file_path + f".tmp{os.getpid()}"
-                with open(temp_file_path, 'w', encoding='utf-8') as f: json.dump(self.cache, f, indent=2)
-                os.replace(temp_file_path, self.cache_file_path)
-                self._dirty_count = 0
-            except (IOError, OSError) as e: log_error(f"保存資料夾快取失敗: {e}", True)
+            with open(json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if data:
+                items = [(k, json.dumps(v)) for k, v in data.items()]
+                with CACHE_LOCK:
+                    self.conn.executemany("INSERT OR REPLACE INTO folders (path, data) VALUES (?, ?)", items)
+                    self.conn.commit()
+        except Exception: pass
 
-    def get_folder_state(self, folder_path: str) -> Union[dict, None]: 
-        return self.cache.get(_norm_key(folder_path))
+    def get_folder_state(self, folder_path: str) -> Union[dict, None]:
+        return self.get_data(folder_path)
 
     def update_folder_state(self, folder_path: str, mtime: float, ctime: Union[float, None], extra: Optional[Dict] = None):
-        key = _norm_key(folder_path)
         state = {'mtime': mtime, 'ctime': ctime}
-        if extra:
-            state.update(extra)
-        self.cache[key] = state
-        self._dirty_count += 1
-        if self._dirty_count >= self.flush_threshold:
-            self.save_cache()
+        if extra: state.update(extra)
+        self.update_data(folder_path, state)
 
     def remove_folders(self, folder_paths: list[str]):
-        changed = False
-        with CACHE_LOCK:
-            for p in folder_paths:
-                key = _norm_key(p)
-                if key in self.cache:
-                    del self.cache[key]
-                    self._dirty_count += 1
-                    changed = True
-        if changed:
-            self.save_cache()
+        """
+        修正: 使用 executemany 直接刪除，避免呼叫 self.remove_data() 造成 CACHE_LOCK 重入死鎖。
+        """
+        keys_to_del = [_norm_key(p) for p in folder_paths]
+        # 清理 buffer
+        for k in keys_to_del:
+             if k in self._pending_updates:
+                 del self._pending_updates[k]
+        
+        if not keys_to_del: return
+
+        try:
+            with CACHE_LOCK:
+                # 直接操作 SQL，不調用會再次加鎖的 self.remove_data
+                items = [(k,) for k in keys_to_del]
+                self.conn.executemany(f"DELETE FROM {self.table_name} WHERE path=?", items)
+                self.conn.commit()
+        except sqlite3.Error as e:
+            log_error(f"SQLite 批量移除資料夾失敗: {e}")
+
+    @property
+    def cache(self) -> dict:
+        # 先將 pending 寫入
+        self.save_cache()
+        try:
+            cursor = self.conn.execute("SELECT path, data FROM folders")
+            return {row[0]: self._deserialize(row[1]) for row in cursor.fetchall()}
+        except sqlite3.Error:
+            return {}
 
     def invalidate_cache(self) -> None:
-        if send2trash is None: log_error("無法清理快取，因為 'send2trash' 模組未安裝。"); return
-        with CACHE_LOCK:
-            self.cache = {};
-            self._dirty_count = 0
-            if os.path.exists(self.cache_file_path):
-                try: 
-                    log_info(f"[快取清理] 準備將資料夾快取檔案 '{self.cache_file_path}' 移至回收桶。")
-                    send2trash.send2trash(self.cache_file_path)
-                except Exception as e: log_error(f"刪除資料夾快取檔案時發生錯誤: {e}", True)
+        if send2trash is None: return
+        self.close()
+        if os.path.exists(self.db_path):
+            try: send2trash.send2trash(self.db_path)
+            except: pass
+        self.conn = self._init_db()
 
 # ======================================================================
 # Section: 高效檔案列舉
@@ -553,8 +603,6 @@ def get_files_to_process(config_dict: Dict,
     time_mode = str(config_dict.get('folder_time_mode', 'mtime'))
     live_folders, folders_to_scan_content, ghost_folders = _unified_scan_traversal(root_folder, excluded_paths, excluded_names, time_filter, folder_cache, progress_queue, control_events, use_pruning, time_mode)
 
-    # --- 【v2.2.0 Hotfix】 ---
-    # 嚴格時間篩選下，修正 "無條件加入新資料夾" 的邏輯
     new_folders = {f for f in live_folders if folder_cache.get_folder_state(f) is None}
     if new_folders:
         if time_filter['enabled']:
@@ -624,33 +672,10 @@ def get_files_to_process(config_dict: Dict,
 
     unchanged_folders = set(live_folders.keys()) - folders_to_scan_content
     
-    folders_in_cache = set()
-    for p in image_cache_manager.cache.keys():
-        try:
-            if _is_virtual_path(p):
-                arch_path, _ = _parse_virtual_path(p)
-                if arch_path: folders_in_cache.add(_norm_key(os.path.dirname(arch_path)))
-            else:
-                folders_in_cache.add(_norm_key(os.path.dirname(p)))
-        except Exception: continue
-    
-    augmented_cache_folders = set(folders_in_cache)
-    for f in list(folders_in_cache):
-        cur = f
-        while True:
-            parent = _norm_key(os.path.dirname(cur))
-            if not parent or parent == cur: break
-            if parent in augmented_cache_folders: break
-            augmented_cache_folders.add(parent)
-            cur = parent
+    folders_needing_scan_due_to_empty_cache = set()
+    if image_cache_manager._is_db_empty() and unchanged_folders:
+         folders_needing_scan_due_to_empty_cache = unchanged_folders.copy()
 
-    folders_needing_scan_due_to_empty_cache = unchanged_folders - augmented_cache_folders
-    
-    # --- 【v2.2.0 Hotfix】 首次啟動時跳過保底補掃 ---
-    if not image_cache_manager.cache:
-        log_info("[保底防護] 首次啟動偵測到圖片快取為空，略過未變更資料夾的保底補掃。")
-        folders_needing_scan_due_to_empty_cache = set()
-    
     if root_norm in folders_needing_scan_due_to_empty_cache:
         folders_needing_scan_due_to_empty_cache.discard(root_norm)
         log_warning("[保護] 根夾缺快取但已跳過保底補掃；如需掃描請改選子資料夾或取消根夾保護。")
@@ -705,11 +730,8 @@ def get_files_to_process(config_dict: Dict,
         before_len = len(scanned_files)
         temp_files_in_container = defaultdict(list)
         
-        # --- 【v2.2.0 Hotfix】 檔案級別時間篩選 ---
-        # 改用不剪枝的 _iter_scandir_recursively，然後手動檢查每個檔案的時間
         for entry in _iter_scandir_recursively(folder, excluded_paths, excluded_names, control_events):
             try:
-                # 僅在啟用時間篩選時檢查檔案時間戳
                 if use_time_window:
                     st = entry.stat(follow_symlinks=False)
                     file_ts = st.st_ctime if time_mode == 'ctime' else st.st_mtime
@@ -763,7 +785,6 @@ def get_files_to_process(config_dict: Dict,
             added_for_this_folder = len(scanned_files) - before_len
             is_empty = (added_for_this_folder == 0)
             if container_empty_mark:
-            #    log_info(f"[無圖標記] 資料夾 '{folder}' {'是' if is_empty else '非'}空的。")
                 folder_cache.update_folder_state(
                     norm_folder,
                     live_folders[norm_folder]['mtime'],
@@ -781,55 +802,32 @@ def get_files_to_process(config_dict: Dict,
     
     cached_files = []
     if unchanged_folders:
-        def _is_container_time_ok(container_path: str) -> bool:
-            if not use_time_window: return True
-            try:
-                stat_info = os.stat(container_path)
-                ts = _folder_time(stat_info, time_mode)
-                dt = datetime.datetime.fromtimestamp(ts)
-                if start and dt < start: return False
-                if end and dt > end: return False
-                return True
-            except OSError: return False
-
-        by_container = defaultdict(list)
-        for p, meta in image_cache_manager.cache.items():
-            try:
-                container_key = ""
-                parent_dir = ""
-                if _is_virtual_path(p):
-                    archive_path, _ = _parse_virtual_path(p)
-                    if archive_path:
-                        container_key = archive_path
-                        parent_dir = _norm_key(os.path.dirname(archive_path))
-                else:
-                    stat_info = _get_file_stat(p)
-                    if stat_info[2] is None: continue
-                    parent_dir = _norm_key(os.path.dirname(p))
-                    container_key = parent_dir
-                
-                if parent_dir in unchanged_folders:
-                    by_container[container_key].append(p)
-            except Exception:
-                continue
-        
-        for container, lst in by_container.items():
-            if not _is_container_time_ok(container):
-                continue
-            lst.sort(key=_natural_sort_key)
-            take = lst[-count:] if enable_limit else lst
-            cached_files.extend(take)
+        try:
+            conn = image_cache_manager.conn
+            cursor = conn.execute("SELECT path FROM images")
+            for row in cursor:
+                p = row[0]
+                try:
+                    if _is_virtual_path(p):
+                         arch_path, _ = _parse_virtual_path(p)
+                         parent = _norm_key(os.path.dirname(arch_path))
+                    else:
+                        parent = _norm_key(os.path.dirname(p))
+                    
+                    if parent in unchanged_folders:
+                         cached_files.append(p)
+                except: continue
+        except sqlite3.Error as e:
+            log_error(f"讀取 SQLite 以恢復快取時出錯: {e}")
             
     final_file_list = scanned_files + cached_files
     folder_cache.save_cache()
+    image_cache_manager.save_cache()
+    
     unique_files = sorted(list(set(final_file_list)))
 
     if quarantine_list:
-        before_count = len(unique_files)
         unique_files = [f for f in unique_files if _norm_key(f) not in quarantine_list]
-        after_count = len(unique_files)
-        if before_count > after_count:
-            log_info(f"[隔離區] 已從待處理清單中過濾掉 {before_count - after_count} 個被隔離的檔案。")
     
     def _path_mtime_for_cap(p: str) -> float:
         try:
@@ -845,13 +843,10 @@ def get_files_to_process(config_dict: Dict,
 
     if mode != 'qr_detection' and global_cap > 0 and len(unique_files) > global_cap:
         unique_files.sort(key=_path_mtime_for_cap, reverse=True)
-        kept = unique_files[:global_cap]
-        log_warning(f"[全域上限] 提取 {len(unique_files)} → {global_cap}（依 mtime 篩選最新）")
-        unique_files = kept
+        unique_files = unique_files[:global_cap]
     elif qr_mode and not enable_limit and qr_global_cap > 0 and len(unique_files) > qr_global_cap:
-        log_error(f"[防爆量] 提取總數 {len(unique_files)} 超過全域上限 {qr_global_cap}，將只處理最新 {qr_global_cap} 筆。")
         unique_files.sort(key=_path_mtime_for_cap, reverse=True)
         unique_files = unique_files[:qr_global_cap]
         
-    log_info(f"檔案提取完成。從 {len(folders_to_scan_content)} 個新/變更夾掃描 {len(scanned_files)} 筆, 從 {len(unchanged_folders)} 個未變更夾恢復 {len(cached_files)} 筆。總計: {len(unique_files)}")
+    log_info(f"檔案提取完成。掃描 {len(scanned_files)} 筆, 恢復 {len(cached_files)} 筆。總計: {len(unique_files)}")
     return unique_files, vpath_size_map
