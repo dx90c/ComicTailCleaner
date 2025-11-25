@@ -51,10 +51,10 @@
 
 請在終端機切換到上述目錄，然後執行以下指令。
 
-#### 📋 單行版本 (直接複製貼上)
+#### 📋 單行版本 (直接複製貼上) 已不用upx.exe 
 
 ```bash
-pyinstaller --noconfirm --clean --windowed --onefile --upx-dir="." --icon="icon.ico" --add-data "plugins;plugins" --add-data "UnRAR.exe;." --hidden-import="gui" --hidden-import="processors" --hidden-import="plugins" --hidden-import="sqlite3" --hidden-import="pyautogui" --hidden-import="pyperclip" --hidden-import="tkcalendar" --collect-all="imagehash" --exclude-module="matplotlib" --exclude-module="pandas" --exclude-module="scipy.stats" --exclude-module="notebook" --exclude-module="test" --exclude-module="setuptools" "app.py"
+pyinstaller --noconfirm --clean --windowed --onefile --add-data "plugins;plugins" --add-data "UnRAR.exe;." --hidden-import="gui" --hidden-import="processors" --hidden-import="plugins" --hidden-import="sqlite3" --hidden-import="pyautogui" --hidden-import="pyperclip" --hidden-import="tkcalendar" --hidden-import="tqdm" --hidden-import="keyboard" --hidden-import="psutil" --collect-all="imagehash" --exclude-module="matplotlib" --exclude-module="pandas" --exclude-module="scipy.stats" --exclude-module="notebook" --exclude-module="test" --exclude-module="setuptools" "app.py"
 ```
 
 #### 📝 多行解析版 (了解細節)
