@@ -50,12 +50,15 @@ def _set_children_state(widget: tk.Widget, state: str) -> None:
     for child in widget.winfo_children():
         _set_children_state(child, state)
 
-def _download_ehtag_db(parent, path_var):
+# 寫死的相對路徑常數
+FIXED_BACKUP_DIR = os.path.join(PLUGIN_BASE_DIR, "Backups")
+FIXED_QUARANTINE_DIR = os.path.join(PLUGIN_BASE_DIR, "Quarantine")
+FIXED_EHTAG_DIR = os.path.join(PLUGIN_BASE_DIR, "EhTagTranslation")
+FIXED_CSV_PATH = os.path.join(PLUGIN_BASE_DIR, "tagfailed.csv")
+
+def _download_ehtag_db(parent):
     url = "https://github.com/EhTagTranslation/Database/releases/latest/download/db.ast.json"
-    
-    target_dir = path_var.get().strip()
-    if not target_dir:
-        target_dir = os.path.join(PLUGIN_BASE_DIR, "EhTagTranslation")
+    target_dir = FIXED_EHTAG_DIR
     
     if not os.path.exists(target_dir):
         try:
@@ -81,12 +84,18 @@ def _download_ehtag_db(parent, path_var):
             out_file.write(data)
         
         btn_top.destroy()
-        
-        path_var.set(_normalize(target_dir))
-        messagebox.showinfo("成功", f"資料庫已下載至：\n{_normalize(target_file)}\n\n路徑已自動填入。", parent=parent)
+        messagebox.showinfo("成功", f"資料庫已下載至：\n{_normalize(target_file)}", parent=parent)
         
     except Exception as e:
         messagebox.showerror("下載失敗", f"無法從 GitHub 下載資料庫：\n{e}\n\n請檢查網路連線。", parent=parent)
+
+def _open_folder(path):
+    """開啟資料夾，若不存在則先建立"""
+    try:
+        os.makedirs(path, exist_ok=True)
+        os.startfile(path)
+    except Exception as e:
+        messagebox.showerror("錯誤", f"無法開啟資料夾：\n{e}")
 
 def create_settings_frame(parent_frame: ttk.Frame,
                           config: Dict[str, Any],
@@ -140,12 +149,8 @@ def create_settings_frame(parent_frame: ttk.Frame,
     ui_vars[f"{plugin_id}_emm_root_folder"]    = var_emm_root # 新增
     ui_vars[f"{plugin_id}_mmd_root_folder"]    = var_mmd_root # 新增
     
-    ui_vars[f"{plugin_id}_backup_dir"]      = tk.StringVar(value=default_path('eh_backup_directory', 'Backups'))
-    ui_vars[f"{plugin_id}_quarantine_path"] = tk.StringVar(value=default_path('eh_quarantine_path', 'Quarantine'))
-    ui_vars[f"{plugin_id}_syringe_dir"]     = tk.StringVar(value=default_path('eh_syringe_directory', 'EhTagTranslation'))
-    ui_vars[f"{plugin_id}_csv_path"]        = tk.StringVar(value=default_path('eh_csv_path', 'tagfailed.csv'))
+    # 寫死路徑，不再存入 config
     ui_vars[f"{plugin_id}_automation_enabled"] = tk.BooleanVar(value=get('automation_enabled', False))
-    ui_vars[f"{plugin_id}_automation_speed"]   = tk.StringVar(value=(get('automation_speed', 'fast') or 'fast'))
 
     # 使用字典來儲存 Entry 引用
     widgets = {}
@@ -260,13 +265,17 @@ def create_settings_frame(parent_frame: ttk.Frame,
     
     auto_frame = ttk.Frame(box)
     auto_frame.grid(row=current_row, column=0, columnspan=3, sticky="w", padx=4, pady=2)
-    ttk.Checkbutton(auto_frame, text="啟用 UI 自動化 (更新 EHM 元數據)", variable=ui_vars[f"{plugin_id}_automation_enabled"]).pack(side="left")
-    ttk.Label(auto_frame, text="   速度：").pack(side="left")
-    ttk.Combobox(auto_frame, width=8, state="readonly", values=["fast", "normal", "safe"], textvariable=ui_vars[f"{plugin_id}_automation_speed"]).pack(side="left")
+    ttk.Checkbutton(auto_frame, text="啟用 UI 自動化 (更新 EMM 元數據)", variable=ui_vars[f"{plugin_id}_automation_enabled"]).pack(side="left")
     current_row += 1
 
-    add_row("EhTag DB 資料夾：", ui_vars[f"{plugin_id}_syringe_dir"], browse_type="dir", 
-            extra_btn=("下載 DB", lambda: _download_ehtag_db(frame, ui_vars[f"{plugin_id}_syringe_dir"])))
+    # EhTag DB：按鈕在前，短路徑在後
+    ehtag_row = ttk.Frame(box)
+    ehtag_row.grid(row=current_row, column=0, columnspan=3, sticky="ew", padx=4, pady=2)
+    ttk.Label(ehtag_row, text="EhTag DB：").pack(side="left")
+    ttk.Button(ehtag_row, text="下載 DB", command=lambda: _download_ehtag_db(frame)).pack(side="left", padx=(4, 2))
+    ttk.Button(ehtag_row, text="🔗 GitHub", command=lambda: webbrowser.open("https://github.com/EhTagTranslation/Database")).pack(side="left")
+    ttk.Label(ehtag_row, text="  data/eh_database_tools/EhTagTranslation/", foreground="gray").pack(side="left")
+    current_row += 1
 
     # === 區域 3: 詳細路徑 ===
     add_section_label("3. 詳細路徑 (自動填入，必要時可手動修改)")
@@ -275,11 +284,21 @@ def create_settings_frame(parent_frame: ttk.Frame,
     is_exe_locked = True if var_mgr_exe.get() and os.path.exists(var_mgr_exe.get()) else False
     is_json_locked = True if var_mmd_json.get() and os.path.exists(var_mmd_json.get()) else False
 
-    add_row("EHM 執行檔路徑：", var_mgr_exe, browse_type="file", widget_key='ent_mgr_auto', read_only=is_exe_locked)
+    add_row("EMM 執行檔路徑：", var_mgr_exe, browse_type="file", widget_key='ent_mgr_auto', read_only=is_exe_locked)
     add_row("MMD JSON 路徑：", var_mmd_json, browse_type="file", widget_key='ent_json_auto', read_only=is_json_locked)
     
-    add_row("備份儲存路徑：", ui_vars[f"{plugin_id}_backup_dir"], browse_type="dir")
-    add_row("CSV 輸出路徑：", ui_vars[f"{plugin_id}_csv_path"], browse_type="file")
+    # 備份/CSV：寫死路徑，只顯示 + 開啟資料夾按鈕
+    fixed_paths_label = "4. 固定路徑 (自動管理，無需手動設定)"
+    add_section_label(fixed_paths_label)
+    
+    short_names = {FIXED_BACKUP_DIR: "data/.../Backups/", os.path.dirname(FIXED_CSV_PATH): "data/.../tagfailed.csv"}
+    for label_text, fixed_path in [("備份儲存：", FIXED_BACKUP_DIR), ("CSV 輸出：", os.path.dirname(FIXED_CSV_PATH))]:
+        row_f = ttk.Frame(box)
+        row_f.grid(row=current_row, column=0, columnspan=3, sticky="ew", padx=4, pady=2)
+        ttk.Label(row_f, text=label_text).pack(side="left")
+        ttk.Button(row_f, text="開啟資料夾", command=lambda p=fixed_path: _open_folder(p)).pack(side="left", padx=(4, 4))
+        ttk.Label(row_f, text=short_names[fixed_path], foreground="gray").pack(side="left")
+        current_row += 1
 
     # --- 狀態連動 ---
     def _toggle_enable(*_):
@@ -312,16 +331,17 @@ def save_settings(config: Dict[str, Any], ui_vars: Dict[str, tk.Variable]) -> Di
     if enable_key in ui_vars:
         config[enable_key] = bool(ui_vars[enable_key].get())
     
-    # 儲存功能路徑
+    # 儲存使用者可變的路徑
     config['eh_data_directory']        = ui_vars[f"{pid}_data_dir"].get().strip()
-    config['eh_backup_directory']      = ui_vars[f"{pid}_backup_dir"].get().strip()
-    config['eh_quarantine_path']       = ui_vars[f"{pid}_quarantine_path"].get().strip()
-    config['eh_syringe_directory']     = ui_vars[f"{pid}_syringe_dir"].get().strip()
     config['eh_mmd_json_path']         = ui_vars[f"{pid}_mmd_json_path"].get().strip()
-    config['eh_csv_path']              = ui_vars[f"{pid}_csv_path"].get().strip()
-    config['automation_enabled']       = bool(ui_vars[f"{pid}_automation_enabled"].get())
-    config['automation_speed']         = (ui_vars[f"{pid}_automation_speed"].get() or "fast").lower()
     config['eh_manga_manager_path']    = ui_vars[f"{pid}_manga_manager_path"].get().strip()
+    config['automation_enabled']       = bool(ui_vars[f"{pid}_automation_enabled"].get())
+    
+    # 寫死路徑 (不再由用戶自訂，但仍存入 config 供 processor 讀取)
+    config['eh_backup_directory']      = _normalize(FIXED_BACKUP_DIR)
+    config['eh_quarantine_path']       = _normalize(FIXED_QUARANTINE_DIR)
+    config['eh_syringe_directory']     = _normalize(FIXED_EHTAG_DIR)
+    config['eh_csv_path']              = _normalize(FIXED_CSV_PATH)
     
     # 儲存介面上的根目錄設定 (確保下次打開不會重置)
     config['eh_emm_root_folder']       = ui_vars[f"{pid}_emm_root_folder"].get().strip()

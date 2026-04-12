@@ -8,19 +8,21 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Tuple, List
 from queue import Queue
 
-# 核心引擎是唯一的外部依賴
+# 核心引擎與基底類別
 from core_engine import ImageComparisonEngine
+from .base_processor import BaseProcessor
 
 # 日誌工具的後備定義
 try:
-    from utils import log_info, log_error
+    from utils import log_info, log_error, log_performance
 except ImportError:
     def log_info(msg): print(f"[INFO] {msg}")
     def log_error(msg): print(f"[ERROR] {msg}")
+    def log_performance(msg): print(f"[PERF] {msg}")
 
 __all__ = ["QrProcessor", "QRProcessor"]
 
-class QrProcessor:
+class QrProcessor(BaseProcessor):
     """
     輕薄封裝：設定 comparison_mode='qr_detection'，然後呼叫核心引擎執行。
     這種設計避免了循環依賴，並將所有複雜的列舉、快取和進程管理

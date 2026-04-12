@@ -1,7 +1,7 @@
 # ======================================================================
 # 檔案名稱：core_engine.py
 # 模組目的：包含核心的比对引擎與增量更新邏輯
-# 版本：2.5.0 (API重構：新增 compute_phashes 公開方法供外掛調用)
+# 版本：2.6.0 (準確度升級：強制啟用 wHash 雙重驗證，消除 pHash 碰撞誤判)
 # ======================================================================
 
 import os
@@ -43,13 +43,13 @@ try:
 except ImportError:
     def log_warning(msg: str): print(f"[WARN] {msg}")
 
-# --- 【v2.4.6 修正】 ---
 # 完整導入所有需要的掃描輔助函式
 from processors.scanner import (
     ScannedImageCacheManager, 
     FolderStateCacheManager, 
     get_files_to_process,
-    _iter_scandir_recursively
+    _iter_scandir_recursively,
+    _natural_sort_key
 )
 
 try:
@@ -67,16 +67,19 @@ except ImportError:
 # ======================================================================
 # Section: 全局常量
 # ======================================================================
-ENGINE_VERSION = "2.5.0"
+ENGINE_VERSION = "2.6.1"
 HASH_BITS = 64
-PHASH_FAST_THRESH   = 0.80
-PHASH_STRICT_SKIP   = 0.93
+PHASH_FAST_THRESH   = 0.70
+PHASH_STRICT_SKIP   = 0.93  # pHash 夠高時可跳過 wHash 覆核
 WHASH_TIER_1        = 0.90
 WHASH_TIER_2        = 0.92
 WHASH_TIER_3        = 0.95
 WHASH_TIER_4        = 0.98
+WHASH_RELAXED_THRESH = 0.70  # pHash 及格時 wHash 門檻
+WHASH_STRICT_THRESH  = 0.85  # wHash 單獨救援門檻 (需同時滿足 WHASH_MIN_PHASH)
+WHASH_MIN_PHASH      = 0.80  # wHash 單獨救援時 pHash 最低下限 (防止無關圖片亂入)
 AD_GROUPING_THRESHOLD = 0.95
-LSH_BANDS = 4
+LSH_BANDS = 8
 
 # --- 快取特徵位元遮罩 ---
 FEATURE_PHASH = 1 << 0
@@ -96,34 +99,19 @@ class ImageComparisonEngine:
         self.total_task_count = 0; self.completed_task_count = 0; self.failed_tasks = []
         self.vpath_size_map = {}
         self.quarantine_list = set()
-        # --- v-MOD: 實例化主掃描快取和廣告庫快取 ---
+        
         self.scan_cache_manager = ScannedImageCacheManager(self.config.get('root_scan_folder'))
         ad_folder = self.config.get('ad_folder_path')
         self.ad_cache_manager = ScannedImageCacheManager(ad_folder) if ad_folder and os.path.isdir(ad_folder) else None
-        # --- v-MOD END ---
+        
         log_performance("[初始化] 掃描引擎實例")
 
-    # --- v-MOD START: 新增公開 API ---
     def compute_phashes(self,
                         paths: List[str],
                         cache_manager: ScannedImageCacheManager,
                         label: str = "圖片指紋",
                         progress_scope: str = "global"
                         ) -> Tuple[bool, Dict[str, Any]]:
-        """
-        【公開API】計算一批圖片的 pHash，並利用快取。
-        這是提供給外掛使用的穩定接口。
-        
-        Args:
-            paths: 待處理的圖片路徑列表。
-            cache_manager: 用於讀寫快取的 ScannedImageCacheManager 實例。
-            label: 顯示在進度條上的任務標籤。
-            progress_scope: 進度條更新範圍 ('global' 或 'local')。
-            
-        Returns:
-            一個元組 (continue_processing, file_data)，表示是否應繼續及處理結果。
-        """
-        # 為了避免循環導入，在方法內部 import
         from processors.qr_engine import _pool_worker_process_image_phash_only
         
         cont, data = self._process_images_with_cache(
@@ -135,7 +123,6 @@ class ImageComparisonEngine:
             progress_scope=progress_scope
         )
         return cont, data
-    # --- v-MOD END ---
         
     def _check_control(self) -> str:
         if self.control_events:
@@ -168,7 +155,8 @@ class ImageComparisonEngine:
             except (json.JSONDecodeError, IOError): pass
 
         comparison_params = {
-            'similarity_threshold': self.config.get('similarity_threshold', 95.0)
+            'similarity_threshold': self.config.get('similarity_threshold', 95.0),
+            'engine_version': ENGINE_VERSION
         }
         params_digest = hashlib.sha256(json.dumps(comparison_params, sort_keys=True).encode()).hexdigest()
 
@@ -235,7 +223,7 @@ class ImageComparisonEngine:
             if mode == 'ad_comparison' or (mode == 'mutual_comparison' and self.config.get('enable_ad_cross_comparison')):
                 ad_catalog_state = self._prepare_ad_catalog_state()
             
-            scan_cache_manager = self.scan_cache_manager # 使用實例變數
+            scan_cache_manager = self.scan_cache_manager
             
             try:
                 mode_map = { "ad_comparison": "廣告比對", "mutual_comparison": "互相比對", "qr_detection": "QR Code 檢測" }
@@ -336,6 +324,18 @@ class ImageComparisonEngine:
                 else:
                     is_hit = True
             
+            if is_hit:
+                # [關鍵修正] 檢查快取中是否真的包含本次需要的特徵
+                features = cached_data.get('features_at', 0)
+                if data_key == 'phash' and not (features & FEATURE_PHASH):
+                    is_hit = False
+                elif data_key == 'whash' and not (features & FEATURE_WHASH):
+                    is_hit = False
+                elif data_key == 'avg_hsv' and not (features & FEATURE_COLOR):
+                    is_hit = False
+                elif data_key == 'qr_points' and not (features & FEATURE_QR):
+                    is_hit = False
+
             if is_hit:
                 for hash_key in ['phash', 'whash']:
                     if hash_key in cached_data and cached_data[hash_key] and not isinstance(cached_data[hash_key], imagehash.ImageHash):
@@ -438,14 +438,22 @@ class ImageComparisonEngine:
                 except RuntimeError: pass
             self.pool = Pool(processes=pool_size)
         self._update_progress(text=f"⚙️ 使用 {pool_size} 進程計算 {len(paths_to_recalc)} 個新檔案...")
+        # v-MOD: 讀取進階特徵提取開關；尋親模式強制開啟兩者
         async_results, path_map = [], {}
+        is_targeted = self.config.get('enable_targeted_search', False)
+        use_rotation   = is_targeted or bool(self.config.get('enable_rotation_matching', False))
+        use_preprocess = is_targeted or bool(self.config.get('enable_image_preprocess', False))
         
         for path in paths_to_recalc:
             worker_name = worker_function.__name__
             payload = path
             
-            if 'qr_code' in worker_name or 'full' in worker_name:
-                payload = (path, int(self.config.get('qr_resize_size', 800)))
+            if 'full' in worker_name:
+                payload = (path, int(self.config.get('qr_resize_size', 800)), use_rotation, use_preprocess)
+            elif 'qr_code' in worker_name:
+                payload = (path, int(self.config.get('qr_resize_size', 800)), bool(self.config.get('enable_qr_color_filter', False)))
+            elif 'phash_only' in worker_name:
+                payload = (path, use_rotation, use_preprocess)
             
             args_to_pass = payload if isinstance(payload, tuple) else (payload,)
             res = self.pool.apply_async(worker_function, args=args_to_pass)
@@ -558,6 +566,9 @@ class ImageComparisonEngine:
             if not img: raise IOError("無法開啟圖片")
             
             img = ImageOps.exif_transpose(img)
+            from utils import _auto_crop_white_borders
+            img = _auto_crop_white_borders(img)
+            
             if need_calc_hsv: ent['avg_hsv'] = _avg_hsv(img)
             if need_calc_whash and imagehash: ent['whash'] = imagehash.whash(img, hash_size=8, mode='haar', remove_max_haar_ll=True)
             
@@ -596,23 +607,55 @@ class ImageComparisonEngine:
         except (TypeError, ValueError):
             return None
 
-    def _accept_pair_with_dual_hash(self, ad_hash_obj, g_hash_obj, ad_w_hash, g_w_hash) -> tuple[bool, float]:
+    def _accept_pair_with_dual_hash(self, ad_hash_obj, g_hash_obj, ad_w_hash, g_w_hash, ad_grid=None, g_grid=None) -> tuple[bool, float]:
         h1, h2 = self._coerce_hash_obj(ad_hash_obj), self._coerce_hash_obj(g_hash_obj)
         w1, w2 = self._coerce_hash_obj(ad_w_hash), self._coerce_hash_obj(g_w_hash)
         if not h1 or not h2: return False, 0.0
         
         sim_p = sim_from_hamming(h1 - h2, HASH_BITS)
-        if sim_p < PHASH_FAST_THRESH: return False, sim_p
-        if sim_p >= PHASH_STRICT_SKIP: return True, sim_p
         
-        if not w1 or not w2: return False, sim_p
+        # --- Grid Hash (敗部復活 / 容錯覆寫) ---
+        grid_rescue = False
+        if ad_grid and g_grid and len(ad_grid) == 4 and len(g_grid) == 4:
+            matched_blocks = 0
+            for gb1, gb2 in zip(ad_grid, g_grid):
+                gh1, gh2 = self._coerce_hash_obj(gb1), self._coerce_hash_obj(gb2)
+                if gh1 and gh2 and sim_from_hamming(gh1 - gh2, HASH_BITS) >= 0.95:
+                    matched_blocks += 1
+            if matched_blocks >= 3:
+                grid_rescue = True
+                
+        if sim_p < PHASH_FAST_THRESH and not grid_rescue: return False, sim_p
+        
+        user_t = float(self.config.get('similarity_threshold', 95.0)) / 100.0
+        
+        if not w1 or not w2: 
+            if grid_rescue: return True, max(sim_p, max(user_t, 0.95))
+            return (True, sim_p) if sim_p >= PHASH_STRICT_SKIP else (False, sim_p)
         
         sim_w = sim_from_hamming(w1 - w2, HASH_BITS)
-        if sim_p >= 0.90:   ok = sim_w >= WHASH_TIER_1
-        elif sim_p >= 0.88: ok = sim_w >= WHASH_TIER_2
-        elif sim_p >= 0.85: ok = sim_w >= WHASH_TIER_3
-        else:               ok = sim_w >= WHASH_TIER_4
-        return (ok, min(sim_p, sim_w) if ok else sim_p)
+        
+        if grid_rescue:
+            return True, max(sim_p, sim_w, max(user_t, 0.95))
+        
+        # wHash 覆核 (可由設定關閉)
+        if not self.config.get('enable_whash', True):
+            return (True, sim_p) if sim_p >= user_t else (False, sim_p)
+        
+        # 尋親模式允許寬鬆比對
+        is_targeted = self.config.get('enable_targeted_search', False)
+        if is_targeted:
+            return True, max(sim_p, sim_w)
+            
+        # wHash 第三層漏斗：閾值隨 pHash 反向縮放
+        # pHash=0.70 -> wHash 需>= 0.90 ; pHash=0.93 -> wHash 需>= 0.70
+        whash_adaptive = 0.90 - max(0.0, min(1.0, (sim_p - 0.70) / 0.23)) * 0.20
+        if sim_w >= whash_adaptive:
+            return True, max(sim_p, sim_w)
+        elif sim_p >= PHASH_STRICT_SKIP:  # pHash 極高時 wHash 實質冗餘，可跳過
+            return True, sim_p
+            
+        return False, sim_p
 
     def _find_similar_images(self, scan_cache_manager: ScannedImageCacheManager, ad_catalog_state: Optional[Dict] = None) -> Union[tuple[list, dict], None]:
         tasks_to_process = self.tasks_to_process
@@ -643,6 +686,7 @@ class ImageComparisonEngine:
         user_thresh_percent = self.config.get('similarity_threshold', 95.0)
         is_mutual_mode = self.config.get('comparison_mode') == 'mutual_comparison'
         ad_folder_path = self.config.get('ad_folder_path'); ad_phash_set = set()
+        ad_data_for_marking = {}
         
         if is_mutual_mode and self.config.get('enable_ad_cross_comparison', True):
             if ad_folder_path and os.path.isdir(ad_folder_path):
@@ -671,10 +715,17 @@ class ImageComparisonEngine:
                 _ad_dmax = hamming_from_sim(_ad_cross_sim, HASH_BITS)
                 _ONEBIT_MASKS = [1 << i for i in range(HASH_BITS)]
                 
-        def lerp(p, s, l): return s + ((100.0 - max(80.0, min(100.0, float(p)))) / 20.0) * (l - s)
-        color_gate_params = { 'hue_deg_tol': lerp(user_thresh_percent, 18.0, 25.0), 'sat_tol': lerp(user_thresh_percent, 0.18, 0.25),
-            'low_sat_value_tol': lerp(user_thresh_percent, 0.10, 0.15), 'low_sat_achroma_tol': lerp(user_thresh_percent, 0.12, 0.18),
-            'low_sat_thresh': 0.18 }
+        def lerp(p, s, l): 
+            weight = (100.0 - max(70.0, min(100.0, float(p)))) / 30.0
+            return s + weight * (l - s)
+            
+        color_gate_params = { 
+            'hue_deg_tol': lerp(user_thresh_percent, 18.0, 35.0), 
+            'sat_tol': lerp(user_thresh_percent, 0.18, 0.40),
+            'low_sat_value_tol': lerp(user_thresh_percent, 0.10, 0.30), 
+            'low_sat_achroma_tol': lerp(user_thresh_percent, 0.12, 0.30),
+            'low_sat_thresh': 0.18 
+        }
         
         ad_data, ad_cache_manager, leader_to_ad_group = {}, None, {}
         
@@ -706,6 +757,62 @@ class ImageComparisonEngine:
             self._update_progress(text=f"🔍 廣告庫預處理完成，找到 {len(ad_data_representatives)} 個獨立廣告組。")
         else: 
             ad_data_representatives = gallery_data.copy()
+
+        # =========================================================
+        # v-MOD: 尋親模式 (Targeted Search) 專屬路徑
+        # 假設廣告庫每張圖在掃描資料夾一定存在對應，
+        # 暴力比對所有組合，只取每張廣告的全局最高分。
+        # =========================================================
+        if is_ad_mode and self.config.get('enable_targeted_search', False):
+            log_info("[尋親模式] 已啟用，將為每張廣告尋找最佳配對（忽略門檻）。")
+            targeted_pairs = []
+            gallery_list = list(gallery_data.items())
+            total_ads = len(ad_data_representatives)
+            TARGETED_FLOOR_SIM = 0.40  # 最低可接受相似度，防止完全不相關的配對
+            
+            for ad_idx, (ad_path, ad_ent) in enumerate(ad_data_representatives.items()):
+                if self._check_control() != 'continue': return None
+                self._update_progress(
+                    text=f"🔍 [尋親] 正在比對第 {ad_idx+1}/{total_ads} 張廣告..."
+                )
+                best_match_path = None
+                best_match_sim = TARGETED_FLOOR_SIM  # 需要超過此下限才會被記錄
+
+                # 取得廣告的所有旋轉指紋
+                ad_h_base = self._coerce_hash_obj(ad_ent.get('phash'))
+                ad_hashes = [ad_h_base] if ad_h_base else []
+                rots = ad_ent.get('phash_rotations', {})
+                for rot_key in ['90', '180', '270']:
+                    rh = self._coerce_hash_obj(rots.get(rot_key))
+                    if rh: ad_hashes.append(rh)
+                
+                if not ad_hashes: continue
+                
+                # 暴力對比掃描中每一張圖
+                for scan_path, scan_ent in gallery_list:
+                    if scan_path in ad_data: continue  # 跳過廣告圖本身
+                    h2 = self._coerce_hash_obj(scan_ent.get('phash'))
+                    if not h2: continue
+                    
+                    best_rot_sim = max(
+                        (sim_from_hamming(h1 - h2, HASH_BITS) for h1 in ad_hashes if h1),
+                        default=0.0
+                    )
+                    if best_rot_sim > best_match_sim:
+                        best_match_sim = best_rot_sim
+                        best_match_path = scan_path
+                
+                if best_match_path:
+                    targeted_pairs.append((ad_path, best_match_path, f"{best_match_sim * 100:.1f}%"))
+                    log_info(f"  [尋親] ✓ {os.path.basename(ad_path)} → {os.path.basename(best_match_path)} ({best_match_sim*100:.1f}%)")
+                else:
+                    log_info(f"  [尋親] ✗ {os.path.basename(ad_path)} → 無法找到高於 {TARGETED_FLOOR_SIM*100:.0f}% 的配對。")
+
+            log_info(f"[尋親模式] 完成，共配對 {len(targeted_pairs)}/{total_ads} 張廣告。")
+            return (targeted_pairs, {})
+        # =========================================================
+        # v-MOD END 尋親模式
+        # =========================================================
             
         phash_index = self._build_phash_band_index(gallery_data)
         temp_found_pairs, user_thresh = [], user_thresh_percent / 100.0
@@ -740,8 +847,46 @@ class ImageComparisonEngine:
                     h2 = self._coerce_hash_obj(h2_raw)
                     if not h1 or not h2: continue
                     
-                    sim_p = sim_from_hamming(h1 - h2, HASH_BITS)
-                    if sim_p < PHASH_FAST_THRESH: continue
+                    # --- 多角度指紋比對 (v-MOD) ---
+                    # 獲取所有可能的旋轉組合
+                    h1_rots = [h1]
+                    if 'phash_rotations' in (ad_data if not is_mutual_mode else gallery_data).get(member_path, {}):
+                        rots = (ad_data if not is_mutual_mode else gallery_data)[member_path]['phash_rotations']
+                        h1_rots.extend([self._coerce_hash_obj(rots.get(k)) for k in ['90', '180', '270'] if k in rots])
+                    
+                    best_sim_p = 0.0
+                    best_rot_key = '0' # 記錄哪個旋轉角度最匹配
+                    for i, h1_cand in enumerate(h1_rots):
+                        if not h1_cand: continue
+                        cur_sim = sim_from_hamming(h1_cand - h2, HASH_BITS)
+                        if cur_sim > best_sim_p:
+                            best_sim_p = cur_sim
+                            best_rot_key = ['0', '90', '180', '270'][i]
+                    
+                    sim_p = best_sim_p
+                    
+                    # --- 網格哈希也進行旋轉匹配 ---
+                    grid1_all = [(ad_data if not is_mutual_mode else gallery_data).get(member_path, {}).get('grid_phash', [])]
+                    if 'grid_rotations' in (ad_data if not is_mutual_mode else gallery_data).get(member_path, {}):
+                        g_rots = (ad_data if not is_mutual_mode else gallery_data)[member_path]['grid_rotations']
+                        grid1_all.extend([g_rots.get(k) for k in ['90', '180', '270'] if k in g_rots])
+                    
+                    grid2 = gallery_data.get(p2_path, {}).get('grid_phash', [])
+                    grid_rescue = False
+                    
+                    # 嘗試所有旋轉的網格，只要有一個對上 3 塊就算成功
+                    for g1_cand in grid1_all:
+                        if grid_rescue: break
+                        if not g1_cand or not grid2 or len(g1_cand) != 4 or len(grid2) != 4: continue
+                        matched_blocks = 0
+                        for gb1, gb2 in zip(g1_cand, grid2):
+                            gh1, gh2 = self._coerce_hash_obj(gb1), self._coerce_hash_obj(gb2)
+                            if gh1 and gh2 and sim_from_hamming(gh1 - gh2, HASH_BITS) >= 0.95:
+                                matched_blocks += 1
+                        if matched_blocks >= 3:
+                            grid_rescue = True
+
+                    if sim_p < PHASH_FAST_THRESH and not grid_rescue: continue
                     stats['passed_phash'] += 1
                     
                     if self.config.get('enable_color_filter', True):
@@ -751,21 +896,38 @@ class ImageComparisonEngine:
                         
                         hsv1 = self.file_data[_norm_key(member_path)].get('avg_hsv')
                         hsv2 = self.file_data[_norm_key(p2_path)].get('avg_hsv')
-                        if not _color_gate(hsv1, hsv2, **color_gate_params): continue
+                        if grid_rescue:
+                            # 即使是網格救援，也必須拒絕極端的亮度反轉 (如純白配純黑)
+                            if hsv1 and hsv2 and abs(hsv1[2] - hsv2[2]) > 0.6:
+                                continue
+                        else:
+                            if not _color_gate(hsv1, hsv2, **color_gate_params): continue
                     
                     stats['passed_color'] += 1
 
-                    accepted, final_sim = True, sim_p
-                    if sim_p < PHASH_STRICT_SKIP:
+                    accepted, final_sim = False, sim_p
+                    if grid_rescue:
+                        accepted, final_sim = True, max(sim_p, max(user_thresh, 0.95))
+                    else:
                         stats['entered_whash'] += 1
-                        cache1 = scan_cache_manager if is_mutual_mode else ad_cache_manager
-                        if not self._ensure_features(member_path, cache1, need_whash=True) or \
-                           not self._ensure_features(p2_path, scan_cache_manager, need_whash=True): continue
-                        
-                        w1 = self.file_data[_norm_key(member_path)].get('whash')
-                        w2 = self.file_data[_norm_key(p2_path)].get('whash')
-                        accepted, final_sim = self._accept_pair_with_dual_hash(h1, h2, w1, w2)
-                    
+                        if not self.config.get('enable_whash', True):
+                            # wHash 已關閉，只要 pHash 及格即接受
+                            if sim_p >= user_thresh:
+                                accepted, final_sim = True, sim_p
+                        else:
+                            cache1 = scan_cache_manager if is_mutual_mode else ad_cache_manager
+                            if self._ensure_features(member_path, cache1, need_whash=True) and \
+                               self._ensure_features(p2_path, scan_cache_manager, need_whash=True):
+                                w1 = self._coerce_hash_obj(self.file_data[_norm_key(member_path)].get('whash'))
+                                w2 = self._coerce_hash_obj(self.file_data[_norm_key(p2_path)].get('whash'))
+                                if w1 and w2:
+                                    sim_w = sim_from_hamming(w1 - w2, HASH_BITS)
+                                    whash_adaptive = 0.90 - max(0.0, min(1.0, (sim_p - 0.70) / 0.23)) * 0.20
+                                    if sim_w >= whash_adaptive:
+                                        accepted, final_sim = True, max(sim_p, sim_w)
+                            elif sim_p >= PHASH_STRICT_SKIP:
+                                accepted = True
+
                     if accepted and final_sim >= user_thresh:
                         is_match, best_sim = True, max(best_sim, final_sim)
 
@@ -790,47 +952,80 @@ class ImageComparisonEngine:
                 while leader in path_to_leader and path_to_leader[leader] != leader: leader = path_to_leader[leader]
                 final_groups[leader].append(path)
             
-            if ad_phash_set:
-                self._update_progress(text="🔄 正在與廣告庫進行交叉比對...")
-                if '_ad_dmax' in locals() and '_ONEBIT_MASKS' in locals() and '_ad_int_set' not in locals():
-                    ad_int_set = locals().get('ad_int_set', set())
-                if '_ad_dmax' in locals() and locals()['_ad_dmax'] <= 1 and 'ad_int_set' in locals() and locals()['ad_int_set']:
-                    for leader, children in final_groups.items():
-                        is_ad_like = False
-                        for p in [leader] + children:
-                            h_obj = self._coerce_hash_obj(self.file_data.get(_norm_key(p), {}).get('phash'))
-                            if not h_obj: continue
-                            v = int(str(h_obj), 16)
-                            if v in ad_int_set:
-                                is_ad_like = True; break
-                            hit = False
-                            for m in _ONEBIT_MASKS:
-                                if (v ^ m) in ad_int_set:
-                                    hit = True; break
-                            if hit:
-                                is_ad_like = True; break
-                        for child in sorted([p for p in children if p != leader]):
-                            h1, h2 = self._coerce_hash_obj(self.file_data.get(_norm_key(leader), {}).get('phash')), \
-                                     self._coerce_hash_obj(self.file_data.get(_norm_key(child), {}).get('phash'))
-                            if h1 and h2:
-                                sim = sim_from_hamming(h1 - h2, HASH_BITS) * 100
-                                value_str = f"{sim:.1f}%" + (" (似廣告)" if is_ad_like else "")
-                                found_items.append((leader, child, value_str))
-                else:
-                    ad_match_thresh = hamming_from_sim(0.98, HASH_BITS)
-                    for leader, children in final_groups.items():
-                        is_ad_like = False
-                        group_hashes = {self._coerce_hash_obj(self.file_data.get(_norm_key(p), {}).get('phash')) for p in [leader] + children}
-                        group_hashes.discard(None)
-                        if any(h and any((h - ah) <= ad_match_thresh for ah in ad_phash_set) for h in group_hashes):
-                            is_ad_like = True
-                        for child in sorted([p for p in children if p != leader]):
-                            h1, h2 = self._coerce_hash_obj(self.file_data.get(_norm_key(leader), {}).get('phash')), \
-                                     self._coerce_hash_obj(self.file_data.get(_norm_key(child), {}).get('phash'))
-                            if h1 and h2:
-                                sim = sim_from_hamming(h1 - h2, HASH_BITS) * 100
-                                value_str = f"{sim:.1f}%" + (" (似廣告)" if is_ad_like else "")
-                                found_items.append((leader, child, value_str))
+            if ad_data_for_marking:
+                self._update_progress(text="🔄 正在與廣告庫進行交叉比對 (使用統一定義引擎)...")
+                for leader, children in final_groups.items():
+                    is_ad_like = False
+                    
+                    # 使用統一邏輯對 leader 進行廣告庫掃描
+                    leader_ent = self.file_data.get(_norm_key(leader), {})
+                    h2 = self._coerce_hash_obj(leader_ent.get('phash'))
+                    grid2 = leader_ent.get('grid_phash')
+                    
+                    if h2:
+                        for ad_path, ad_ent in ad_data_for_marking.items():
+                            h1 = self._coerce_hash_obj(ad_ent.get('phash'))
+                            grid1 = ad_ent.get('grid_phash')
+                            if not h1: continue
+                            
+                            # --- 多角度廣告判定 (v-MOD) ---
+                            h1_rots = [h1]
+                            if 'phash_rotations' in ad_ent:
+                                h1_rots.extend([self._coerce_hash_obj(ad_ent['phash_rotations'].get(k)) for k in ['90', '180', '270'] if k in ad_ent['phash_rotations']])
+                            
+                            sim_p = max([sim_from_hamming(can - h2, HASH_BITS) for can in h1_rots if can] + [0.0])
+                            
+                            grid1_all = [ad_ent.get('grid_phash', [])]
+                            if 'grid_rotations' in ad_ent:
+                                grid1_all.extend([ad_ent['grid_rotations'].get(k) for k in ['90', '180', '270'] if k in ad_ent['grid_rotations']])
+                            
+                            grid_rescue = False
+                            for g1_cand in grid1_all:
+                                if grid_rescue: break
+                                if g1_cand and grid2 and len(g1_cand) == 4 and len(grid2) == 4:
+                                    matched_blocks = 0
+                                    for gb1, gb2 in zip(g1_cand, grid2):
+                                        gh1, gh2 = self._coerce_hash_obj(gb1), self._coerce_hash_obj(gb2)
+                                        if gh1 and gh2 and sim_from_hamming(gh1 - gh2, HASH_BITS) >= 0.95:
+                                            matched_blocks += 1
+                                    if matched_blocks >= 3: grid_rescue = True
+                                
+                            if sim_p < PHASH_FAST_THRESH and not grid_rescue: continue
+                            
+                            if self.config.get('enable_color_filter', True):
+                                if not self._ensure_features(ad_path, ad_cache, need_hsv=True) or not self._ensure_features(leader, scan_cache_manager, need_hsv=True): continue
+                                hsv1 = self.file_data[_norm_key(ad_path)].get('avg_hsv')
+                                hsv2 = self.file_data[_norm_key(leader)].get('avg_hsv')
+                                if grid_rescue:
+                                    if hsv1 and hsv2 and abs(hsv1[2] - hsv2[2]) > 0.6: continue
+                                else:
+                                    if not _color_gate(hsv1, hsv2, **color_gate_params): continue
+                                
+                            accepted = False
+                            if grid_rescue:
+                                accepted = True
+                            elif not self.config.get('enable_whash', True):
+                                if sim_p >= user_thresh: accepted = True
+                            else:
+                                w1 = self._coerce_hash_obj(ad_ent.get('whash'))
+                                w2 = self._coerce_hash_obj(leader_ent.get('whash'))
+                                if w1 and w2:
+                                    sim_w = sim_from_hamming(w1 - w2, HASH_BITS)
+                                    whash_adaptive = 0.90 - max(0.0, min(1.0, (sim_p - 0.70) / 0.23)) * 0.20
+                                    if sim_w >= whash_adaptive: accepted = True
+                                elif sim_p >= PHASH_STRICT_SKIP: accepted = True
+                                
+                            if accepted:
+                                is_ad_like = True
+                                break
+
+                    for child in sorted([p for p in children if p != leader]):
+                        h1, h2 = self._coerce_hash_obj(self.file_data.get(_norm_key(leader), {}).get('phash')), \
+                                 self._coerce_hash_obj(self.file_data.get(_norm_key(child), {}).get('phash'))
+                        if h1 and h2:
+                            sim = sim_from_hamming(h1 - h2, HASH_BITS) * 100
+                            value_str = f"{sim:.1f}%" + (" (似廣告)" if is_ad_like else "")
+                            found_items.append((leader, child, value_str))
             else:
                 for leader, children in final_groups.items():
                     for child in sorted([p for p in children if p != leader]):
@@ -897,6 +1092,20 @@ class ImageComparisonEngine:
         else:
             return self._detect_qr_codes_pure(self.tasks_to_process, scan_cache_manager)
 
+    def _group_qr_results_by_phash(self, flat_qr_list: list, file_data: dict) -> list:
+        """
+        委派給 qr_engine.group_qr_results_by_phash()。
+        門檻直接使用使用者在設定視窗中設定的相似度閾值（與廣告比對、互相比對同一條滑桿），
+        語義一致：「達到 X% 相似度才算同一張廣告」。
+        """
+        from processors.qr_engine import group_qr_results_by_phash as _qr_group
+        user_pct = float(self.config.get('similarity_threshold', 95.0))
+        qr_thresh = user_pct / 100.0
+        log_info(f"[QR 分組] 使用相似度門檻 {user_pct:.0f}%（與其他比對模式共用）")
+        return _qr_group(flat_qr_list, file_data, sim_threshold=qr_thresh)
+
+
+
     def _detect_qr_codes_pure(self, files_to_process: list[str], scan_cache_manager: ScannedImageCacheManager) -> Union[tuple[list, dict], None]:
         log_info("[QR] 正在執行純粹掃描模式...")
         continue_processing, file_data = self._process_images_with_cache(
@@ -904,9 +1113,10 @@ class ImageComparisonEngine:
             _pool_worker_detect_qr_code, 'qr_points'
         )
         if not continue_processing: return None
-        found_qr_images = [(path, path, "QR Code 檢出") for path, data in file_data.items() if data and data.get('qr_points')]
+        flat_qr = [(path, path, "🆕 新掃描 QR", "qr_item") for path, data in file_data.items() if data and data.get('qr_points')]
         self.file_data = file_data
-        return found_qr_images, self.file_data
+        grouped = self._group_qr_results_by_phash(flat_qr, file_data)
+        return grouped, self.file_data
 
     def _detect_qr_codes_hybrid(self, files_to_process: list[str], scan_cache_manager: ScannedImageCacheManager) -> Union[tuple[list, dict], None]:
         log_info("[QR] 正在執行混合掃描模式...")
@@ -943,11 +1153,18 @@ class ImageComparisonEngine:
         found_ad_matches = []
         user_thresh = self.config.get('similarity_threshold', 95.0) / 100.0
         for ad_path, ad_ent in ad_with_phash.items():
-            if self._check_control() != 'continue': return None
+            ctrl = self._check_control()
+            if ctrl == 'cancel': return None
+            while ctrl == 'pause':
+                time.sleep(0.5)
+                ctrl = self._check_control()
+                if ctrl == 'cancel': return None
+            
             ad_p_hash = self._coerce_hash_obj(ad_ent.get('phash'))
             if not ad_p_hash: continue
             candidate_paths = self._lsh_candidates_for(ad_path, ad_p_hash, phash_index)
             for g_path in candidate_paths:
+                if g_path in ad_with_phash: continue
                 g_p_hash = self._coerce_hash_obj(gallery_data.get(g_path, {}).get('phash'))
                 if not g_p_hash: continue
 
@@ -963,7 +1180,7 @@ class ImageComparisonEngine:
                     is_accepted, final_sim_val = self._accept_pair_with_dual_hash(ad_p_hash, g_p_hash, ad_w_hash, g_w_hash)
                 
                 if is_accepted and final_sim_val >= user_thresh and ad_ent.get('qr_points'):
-                    found_ad_matches.append((ad_path, g_path, "廣告匹配(快速)"))
+                    found_ad_matches.append((ad_path, g_path, "已在此廣告分類", "ad_like_group"))
                     gallery_data.setdefault(g_path, {})['qr_points'] = ad_ent['qr_points']
                         
         matched_gallery_paths = {_norm_key(pair[1]) for pair in found_ad_matches}
@@ -971,13 +1188,19 @@ class ImageComparisonEngine:
         
         self._update_progress(text=f"🔍 對剩餘 {len(remaining_files_for_qr)} 個檔案進行 QR 掃描（局部進度）")
         if remaining_files_for_qr:
-            if self._check_control() != 'continue': return None
+            ctrl = self._check_control()
+            if ctrl == 'cancel': return None
+            while ctrl == 'pause':
+                time.sleep(0.5)
+                ctrl = self._check_control()
+                if ctrl == 'cancel': return None
             continue_proc_qr, qr_data = self._process_images_with_cache(
                 remaining_files_for_qr, scan_cache_manager, "QR Code 檢測", 
                 _pool_worker_detect_qr_code, 'qr_points', progress_scope='local'
             )
             if not continue_proc_qr: return None
-            qr_results = [(path, path, "QR Code 檢出") for path, data in qr_data.items() if data and data.get('qr_points')]
+            flat_qr = [(path, path, "🆕 新掃描 QR", "qr_item") for path, data in qr_data.items() if data and data.get('qr_points')]
+            qr_results = self._group_qr_results_by_phash(flat_qr, qr_data)
             found_ad_matches.extend(qr_results)
             self.file_data.update(qr_data)
         scan_cache_manager.save_cache()

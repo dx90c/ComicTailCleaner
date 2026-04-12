@@ -27,7 +27,7 @@ except Exception:
     DATA_DIR = _BASE_DIR
 
 # === 應用程式基本資訊 ===
-APP_VERSION = "16.0.2"
+APP_VERSION = "17.0.0"
 APP_NAME_EN = "ComicTailCleaner"
 APP_NAME_TC = "漫畫尾頁廣告清理"
 
@@ -69,6 +69,7 @@ default_config = {
 
     # --- QR Code 相關設定 ---
     'enable_qr_hybrid_mode': True,
+    'enable_qr_color_filter': False,
     'qr_resize_size': 1000,
     'qr_pages_per_archive': 10,
     'qr_global_cap': 20000,
@@ -91,7 +92,7 @@ default_config = {
     'prune_image_cache_on_missing_folder': False,
     'container_empty_mark': True,
     'cache_flush_threshold': 10000,
-    "first_scan_extract_count": 64,
+    "first_scan_extract_count": 0,
     'enable_quarantine': True,
     'enable_quick_digest': True,
 
@@ -108,5 +109,5 @@ WHASH_TIER_2 = 0.92
 WHASH_TIER_3 = 0.95
 WHASH_TIER_4 = 0.98
 AD_GROUPING_THRESHOLD = 0.95
-LSH_BANDS = 4
+LSH_BANDS = 8
 

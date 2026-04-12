@@ -69,9 +69,40 @@ __all__ = [
     'log_info', 'log_error', 'log_warning', 'log_performance',
     '_norm_key', '_is_virtual_path', '_parse_virtual_path', '_sanitize_path_for_filename',
     '_open_image_from_any_path', '_get_file_stat', 'sim_from_hamming', 'hamming_from_sim',
-    '_avg_hsv', '_color_gate', '_open_folder', 'check_and_install_packages',
-    'load_config', 'save_config', 'CACHE_LOCK', 'ARCHIVE_SUPPORT_ENABLED', 'QR_SCAN_ENABLED'
+    '_avg_hsv', '_color_gate', '_open_folder', '_reveal_in_explorer', 'check_and_install_packages',
+    'load_config', 'save_config', 'CACHE_LOCK', 'ARCHIVE_SUPPORT_ENABLED', 'QR_SCAN_ENABLED',
+    '_auto_crop_white_borders'
 ]
+
+# --- 【臨時功能：自動裁切白邊】 ---
+def _auto_crop_white_borders(img: "Image.Image", tolerance: int = 240) -> "Image.Image":
+    """
+    自動裁切圖片四周的白邊 (亮度大於 tolerance 的視為白邊)
+    回傳裁切後的圖片拷貝，若無白邊或出錯則回傳原圖。
+    """
+    try:
+        from PIL import Image, ImageOps
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        
+        gray = img.convert("L")
+        # 自動對比優化：確保淺灰色掃描底色也能被拉到接近 255 的純白，以便正確裁切
+        gray = ImageOps.autocontrast(gray, cutoff=2)
+        
+        lut = [255 if i < tolerance else 0 for i in range(256)]
+        mask = gray.point(lut)
+        bbox = mask.getbbox()
+        if bbox:
+            img = img.crop(bbox)
+            
+        # 標準化為直向 (Portrait) 以解決掃描器90度旋轉問題
+        if getattr(img, 'width', 0) > getattr(img, 'height', 0):
+            img = img.rotate(90, expand=True)
+            
+        return img
+    except Exception:
+        pass
+    return img
 
 # --- 【v1.2.0 新增】 ---
 def _calculate_quick_digest(path: str) -> Optional[str]:
@@ -161,8 +192,12 @@ def _parse_virtual_path(vpath: str) -> Tuple[Optional[str], Optional[str]]:
         return None, None
     try:
         _, content = vpath.split(VPATH_PREFIX, 1)
-        archive_path, inner_path = content.split(VPATH_SEPARATOR, 1)
+        # 改用 rsplit，並限制切分 1 次。這樣會從最右邊的 '!' 開始切，
+        # 確保前面路徑裡的 '!' 不會干擾。
+        archive_path, inner_path = content.rsplit(VPATH_SEPARATOR, 1)
         return archive_path, inner_path
+        
+        
     except (ValueError, IndexError):
         log_error(f"解析虛擬路徑失敗: {vpath}")
         return None, None
@@ -234,7 +269,7 @@ def _color_gate(hsv1, hsv2, *, hue_deg_tol, sat_tol, low_sat_thresh, low_sat_val
         if abs(v1 - v2) > low_sat_value_tol: return False
         a1, a2 = v1 * (1.0 - s1), v2 * (1.0 - s2)
         if abs(a1 - a2) > low_sat_achroma_tol: return False
-        if abs(s1 - s2) > 0.08: return False
+        if abs(s1 - s2) > 0.15: return False
         return True
 
     dh = abs(h1 - h2)
@@ -256,7 +291,27 @@ def _open_folder(folder_path: str):
     except Exception as e:
         log_error(f"無法自動開啟資料夾 '{folder_path}': {e}", True)
 
-def check_and_install_packages():
+def _reveal_in_explorer(path: str):
+    """
+    在檔案總管中開啟並**高亮選取**指定的路徑（可以是檔案或資料夾）。
+    - Windows : explorer /select,"path"
+    - macOS   : open -R "path"
+    - Linux   : xdg-open 上層目錄（Linux 不支援直接選取）
+    """
+    try:
+        norm = os.path.normpath(path)
+        if sys.platform == "win32":
+            subprocess.Popen(['explorer', '/select,', norm])
+        elif sys.platform == "darwin":
+            subprocess.Popen(['open', '-R', norm])
+        else:
+            # Linux 退路：開上層目錄
+            parent = os.path.dirname(norm)
+            subprocess.Popen(['xdg-open', parent])
+    except Exception as e:
+        log_error(f"無法在檔案總管中顯示路徑 '{path}': {e}", True)
+
+
     global QR_SCAN_ENABLED, PERFORMANCE_LOGGING_ENABLED, psutil, ARCHIVE_SUPPORT_ENABLED
 
     if getattr(sys, 'frozen', False):

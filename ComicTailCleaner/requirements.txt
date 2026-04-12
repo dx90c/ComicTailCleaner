@@ -1,0 +1,12 @@
+Pillow>=9.0.0
+imagehash>=4.3.1
+nanoid>=2.0.0
+numpy>=1.21.0
+opencv-python>=4.5.0
+psutil>=5.9.0
+pyautogui>=0.9.53
+pyperclip>=1.8.2
+rarfile>=4.0
+send2trash>=1.8.0
+tkcalendar>=1.6.1
+websocket-client>=1.3.0

@@ -1,7 +1,7 @@
 # ======================================================================
 # 檔案名稱：processors/scanner.py
 # 模組目的：提供統一的文件掃描、SQLite 緩存管理及多進程 workers
-# 版本：3.0.1 (Hotfix: 修正 remove_folders 中的 CACHE_LOCK 死結問題)
+# 版本：3.1.3 (合併版：整合 v3.1.2 智慧掃描與 v3.0.1 死結修復/剪枝優化)
 # ======================================================================
 
 import os
@@ -50,7 +50,7 @@ except ImportError:
     ARCHIVE_SUPPORT_ENABLED = False
     
 # === 版本常數 ===
-SCANNER_ENGINE_VERSION = "3.0.1"
+SCANNER_ENGINE_VERSION = "3.1.3"
 
 # --- 全域設定讀取 ---
 DEFAULT_IMG_FLUSH_THRESHOLD = 1000
@@ -87,45 +87,6 @@ def _iter_scandir_recursively(root_path: str, excluded_paths: set, excluded_name
                         yield entry
         except OSError:
             continue
-
-def _iter_scandir_time_pruned(root_path: str, excluded_paths: set, excluded_names: set,
-                              control_events: Optional[dict], max_depth: int,
-                              start: Optional[datetime.datetime], end: Optional[datetime.datetime],
-                              time_mode: str) -> Generator[os.DirEntry, None, None]:
-    root_norm = _norm_key(root_path)
-    base_depth = root_norm.count(os.sep)
-    queue = deque([root_path])
-    while queue:
-        if control_events and control_events.get('cancel') and control_events['cancel'].is_set():
-            return
-        cur = queue.popleft()
-        norm_cur = _norm_key(cur)
-        if (
-            any(norm_cur == ex or norm_cur.startswith(ex + os.sep) for ex in excluded_paths)
-            or os.path.basename(norm_cur).lower() in excluded_names
-        ):
-            continue
-        cur_depth = norm_cur.count(os.sep) - base_depth
-        try:
-            with os.scandir(cur) as it:
-                for entry in it:
-                    if entry.is_file():
-                        yield entry
-                    elif entry.is_dir(follow_symlinks=False):
-                        try:
-                            st = entry.stat(follow_symlinks=False)
-                            ts = _folder_time(st, time_mode)
-                            if start and datetime.datetime.fromtimestamp(ts) < start:
-                                continue
-                            if end and datetime.datetime.fromtimestamp(ts) > end:
-                                continue
-                        except OSError:
-                            continue
-                        if cur_depth < max_depth:
-                            queue.append(entry.path)
-        except OSError:
-            continue
-
 
 # === 多進程 Worker 函式 ===
 def _detect_qr_on_image(img) -> Union[list, None]:
@@ -192,7 +153,6 @@ def _pool_worker_process_image_phash_only(payload: Union[str, tuple]) -> tuple[s
 
 # === SQLite 快取基類 ===
 class SQLiteCacheBase:
-    """提供通用的 SQLite 操作基礎"""
     def __init__(self, db_path: str, table_name: str):
         self.db_path = db_path
         self.table_name = table_name
@@ -202,7 +162,6 @@ class SQLiteCacheBase:
         
     def _init_db(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        # 啟用 WAL 模式以提升並發性能
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute(f"CREATE TABLE IF NOT EXISTS {self.table_name} (path TEXT PRIMARY KEY, data TEXT)")
@@ -238,25 +197,19 @@ class SQLiteCacheBase:
         key = _norm_key(path)
         if key in self._pending_updates:
             return self._pending_updates[key]
-        
         try:
             cursor = self.conn.execute(f"SELECT data FROM {self.table_name} WHERE path=?", (key,))
             row = cursor.fetchone()
-            if row:
-                return self._deserialize(row[0])
-        except sqlite3.Error as e:
-            log_error(f"SQLite 讀取錯誤: {e}")
+            if row: return self._deserialize(row[0])
+        except sqlite3.Error as e: log_error(f"SQLite 讀取錯誤: {e}")
         return None
 
     def update_data(self, path: str, data: dict):
         if not data or 'error' in data: return
         key = _norm_key(path)
-        
         current = self.get_data(key) or {}
         current.update(data)
-        
         self._pending_updates[key] = current
-        
         if len(self._pending_updates) >= self.flush_threshold:
             self.save_cache()
 
@@ -268,35 +221,28 @@ class SQLiteCacheBase:
                 self.conn.executemany(f"INSERT OR REPLACE INTO {self.table_name} (path, data) VALUES (?, ?)", items)
                 self.conn.commit()
                 self._pending_updates.clear()
-            except sqlite3.Error as e:
-                log_error(f"SQLite 寫入錯誤: {e}")
+            except sqlite3.Error as e: log_error(f"SQLite 寫入錯誤: {e}")
 
     def remove_data(self, path: str) -> bool:
         key = _norm_key(path)
-        if key in self._pending_updates:
-            del self._pending_updates[key]
-        
+        if key in self._pending_updates: del self._pending_updates[key]
         try:
             with CACHE_LOCK:
                 self.conn.execute(f"DELETE FROM {self.table_name} WHERE path=?", (key,))
                 self.conn.commit()
             return True
-        except sqlite3.Error:
-            return False
+        except sqlite3.Error: return False
 
     def remove_prefix(self, prefix: str):
         prefix_norm = _norm_key(prefix)
         keys_to_del = [k for k in self._pending_updates if k.startswith(prefix_norm)]
-        for k in keys_to_del:
-            del self._pending_updates[k]
-            
+        for k in keys_to_del: del self._pending_updates[k]
         try:
             with CACHE_LOCK:
                 pattern = prefix_norm + "%"
                 self.conn.execute(f"DELETE FROM {self.table_name} WHERE path LIKE ?", (pattern,))
                 self.conn.commit()
-        except sqlite3.Error as e:
-            log_error(f"SQLite 批量刪除錯誤: {e}")
+        except sqlite3.Error as e: log_error(f"SQLite 批量刪除錯誤: {e}")
 
     def close(self):
         self.save_cache()
@@ -324,10 +270,8 @@ class ScannedImageCacheManager(SQLiteCacheBase):
         log_info(f"[快取] SQLite 圖片快取已就緒: '{self.cache_file_path}'")
 
     def _is_db_empty(self) -> bool:
-        try:
-            return self.conn.execute("SELECT COUNT(*) FROM images").fetchone()[0] == 0
-        except sqlite3.Error:
-            return True
+        try: return self.conn.execute("SELECT COUNT(*) FROM images").fetchone()[0] == 0
+        except sqlite3.Error: return True
 
     def _migrate_from_json(self, json_path: str):
         log_info(f"[遷移] 偵測到舊版 JSON 快取 '{json_path}'，正在遷移至 SQLite...")
@@ -335,26 +279,22 @@ class ScannedImageCacheManager(SQLiteCacheBase):
             with open(json_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 images = data.get('images', data)
-                
             if images:
                 items = []
                 for path, meta in images.items():
                     norm_p = _norm_key(path)
                     items.append((norm_p, json.dumps(meta)))
-                
                 with CACHE_LOCK:
                     self.conn.executemany("INSERT OR REPLACE INTO images (path, data) VALUES (?, ?)", items)
                     self.conn.commit()
                 log_info(f"[遷移] 成功遷移 {len(items)} 筆資料。")
                 try: os.rename(json_path, json_path + ".bak")
                 except OSError: pass
-                
-        except Exception as e:
-            log_error(f"[遷移] 遷移失敗: {e}", True)
+        except Exception as e: log_error(f"[遷移] 遷移失敗: {e}", True)
 
     def remove_entries_from_folder(self, folder_path: str) -> int:
         self.remove_prefix(folder_path)
-        return 0 
+        return 0
 
     def invalidate_cache(self) -> None:
         if send2trash is None: return
@@ -383,7 +323,7 @@ class FolderStateCacheManager(SQLiteCacheBase):
                 self._migrate_from_json(json_path_legacy)
 
         log_info(f"[快取] SQLite 資料夾快取已就緒: '{self.cache_file_path}'")
-        
+
     def _is_db_empty(self) -> bool:
         try: return self.conn.execute("SELECT COUNT(*) FROM folders").fetchone()[0] == 0
         except: return True
@@ -404,33 +344,27 @@ class FolderStateCacheManager(SQLiteCacheBase):
 
     def update_folder_state(self, folder_path: str, mtime: float, ctime: Union[float, None], extra: Optional[Dict] = None):
         state = {'mtime': mtime, 'ctime': ctime}
-        if extra: state.update(extra)
+        if extra:
+            state.update(extra)
         self.update_data(folder_path, state)
 
     def remove_folders(self, folder_paths: list[str]):
-        """
-        修正: 使用 executemany 直接刪除，避免呼叫 self.remove_data() 造成 CACHE_LOCK 重入死鎖。
-        """
+        # [v3.0.1 Fix] 使用 executemany 避免 CACHE_LOCK 死結
         keys_to_del = [_norm_key(p) for p in folder_paths]
-        # 清理 buffer
         for k in keys_to_del:
              if k in self._pending_updates:
                  del self._pending_updates[k]
-        
         if not keys_to_del: return
-
         try:
             with CACHE_LOCK:
-                # 直接操作 SQL，不調用會再次加鎖的 self.remove_data
                 items = [(k,) for k in keys_to_del]
                 self.conn.executemany(f"DELETE FROM {self.table_name} WHERE path=?", items)
                 self.conn.commit()
         except sqlite3.Error as e:
             log_error(f"SQLite 批量移除資料夾失敗: {e}")
-
+            
     @property
     def cache(self) -> dict:
-        # 先將 pending 寫入
         self.save_cache()
         try:
             cursor = self.conn.execute("SELECT path, data FROM folders")
@@ -447,15 +381,13 @@ class FolderStateCacheManager(SQLiteCacheBase):
         self.conn = self._init_db()
 
 # ======================================================================
-# Section: 高效檔案列舉
+# Section: 高效檔案列舉 (修正版：智慧根目錄保護 + 剪枝優化 + 完整清理)
 # ======================================================================
 
-def _unified_scan_traversal(root_folder: str, excluded_paths: set, excluded_names: set, time_filter: dict, folder_cache: 'FolderStateCacheManager', progress_queue: Optional[Queue], control_events: Optional[dict], use_pruning: bool, time_mode: str) -> Tuple[Dict[str, Any], Set[str], Set[str]]:
-    log_info(f"啟動 v{SCANNER_ENGINE_VERSION} 統一掃描引擎...")
+def _unified_scan_traversal(root_folder: str, excluded_paths: set, excluded_names: set, time_filter: dict, folder_cache: 'FolderStateCacheManager', progress_queue: Optional[Queue], control_events: Optional[dict], use_pruning: bool, time_mode: str, required_count: int) -> Tuple[Dict[str, Any], Set[str], Set[str]]:
     
-    def _scan_newest_first_recursive(path: str, time_filter: dict, excluded_paths: set, excluded_names: set, control_events: Optional[dict], stats: Dict[str, int], time_mode: str, is_root: bool = False) -> Generator[str, None, None]:
-        if control_events and control_events.get('cancel') and control_events['cancel'].is_set():
-            return
+    def _scan_newest_first_recursive(path: str, stats: Dict[str, int], is_root: bool = False) -> Generator[str, None, None]:
+        if control_events and control_events.get('cancel') and control_events['cancel'].is_set(): return
 
         norm_path = _norm_key(path)
         base_name = os.path.basename(norm_path).lower()
@@ -467,13 +399,11 @@ def _unified_scan_traversal(root_folder: str, excluded_paths: set, excluded_name
             st = os.stat(path)
             cur_ts = _folder_time(st, time_mode)
             mtime_dt = datetime.datetime.fromtimestamp(cur_ts)
-            start = time_filter.get('start')
-            end   = time_filter.get('end')
+            start, end = time_filter.get('start'), time_filter.get('end')
 
-            if not is_root:
-                if start and mtime_dt < start:
-                    stats['pruned_by_start'] += 1
-                    return
+            if not is_root and start and mtime_dt < start:
+                stats['pruned_by_start'] += 1
+                return
 
             in_range = (not start or mtime_dt >= start) and (not end or mtime_dt <= end)
             if in_range:
@@ -484,86 +414,80 @@ def _unified_scan_traversal(root_folder: str, excluded_paths: set, excluded_name
             subdirs = []
             with os.scandir(path) as it:
                 for entry in it:
-                    if control_events and control_events.get('cancel') and control_events['cancel'].is_set(): return
                     if entry.is_dir(follow_symlinks=False):
                         try:
                             st_sub = entry.stat(follow_symlinks=False)
                             subdirs.append((entry.path, _folder_time(st_sub, time_mode)))
-                        except OSError:
-                            continue
+                        except OSError: continue
             
             subdirs.sort(key=lambda x: x[1], reverse=True)
 
             processed_count = 0
             for subdir_path, mt in subdirs:
-                if control_events and control_events.get('cancel') and control_events['cancel'].is_set(): return
                 if start and datetime.datetime.fromtimestamp(mt) < start:
                     stats['pruned_by_start'] += (len(subdirs) - processed_count)
                     break
                 processed_count += 1
-                yield from _scan_newest_first_recursive(subdir_path, time_filter, excluded_paths, excluded_names, control_events, stats, time_mode, is_root=False)
+                yield from _scan_newest_first_recursive(subdir_path, stats, is_root=False)
         except OSError:
             return
 
+    target_folders_iter = []
     if not use_pruning or not time_filter.get('enabled') or not time_filter.get('start'):
-        log_info("使用標準 BFS 掃描 (未啟用剪枝或時間篩選)。")
-        live_folders, changed_or_new_folders = {}, set()
+        log_info("使用標準 BFS 掃描。")
+        target_folders_iter = []
         queue = deque([root_folder])
-        scanned_count = 0
-        cached_states = folder_cache.cache.copy()
-        
         while queue:
-            if control_events and control_events.get('cancel') and control_events['cancel'].is_set():
-                return {}, set(), set()
-            current_dir = queue.popleft()
-            norm_current_dir = _norm_key(current_dir)
-            if any(norm_current_dir == ex or norm_current_dir.startswith(ex + os.sep) for ex in excluded_paths) or os.path.basename(norm_current_dir).lower() in excluded_names:
-                continue
+            curr = queue.popleft()
+            target_folders_iter.append(curr)
             try:
-                stat_info = os.stat(current_dir)
-                cached_states.pop(norm_current_dir, None)
-                scanned_count += 1
-                if scanned_count % 100 == 0:
-                    time.sleep(0.001)
-                    if progress_queue: progress_queue.put({'type': 'text', 'text': f"📁 正在檢查資料夾結構... ({scanned_count})"})
-
-                live_folders[norm_current_dir] = {'mtime': stat_info.st_mtime, 'ctime': stat_info.st_ctime}
-                cached_entry = folder_cache.get_folder_state(norm_current_dir)
-                if not cached_entry or abs(_folder_time(stat_info, time_mode) - cached_entry.get('mtime', 0)) > 1e-6:
-                    changed_or_new_folders.add(norm_current_dir)
-
-                with os.scandir(current_dir) as it:
+                with os.scandir(curr) as it:
                     for entry in it:
                         if entry.is_dir(follow_symlinks=False):
-                            queue.append(entry.path)
-            except OSError: continue
-        
-        ghost_folders = set(cached_states.keys())
-        log_info(f"BFS 掃描完成。即時資料夾: {len(live_folders)}, 新/變更: {len(changed_or_new_folders)}, 幽靈資料夾: {len(ghost_folders)}")
-        return live_folders, changed_or_new_folders, ghost_folders
+                            norm = _norm_key(entry.path)
+                            base = os.path.basename(norm).lower()
+                            if not (any(norm == ex or norm.startswith(ex + os.sep) for ex in excluded_paths) or base in excluded_names):
+                                queue.append(entry.path)
+            except OSError: pass
+    else:
+        log_info("啟用時間篩選，使用智慧型遞迴剪枝 (DFS) 掃描...")
+        stats = defaultdict(int)
+        target_folders_iter = list(_scan_newest_first_recursive(root_folder, stats, is_root=True))
+        log_info(f"DFS 掃描完成。訪問: {stats['visited_dirs']}")
 
-    log_info("啟用時間篩選，使用智慧型遞迴剪枝 (DFS) 掃描...")
-    stats = defaultdict(int)
-    all_scanned_paths = list(_scan_newest_first_recursive(root_folder, time_filter, excluded_paths, excluded_names, control_events, stats, time_mode, is_root=True))
-    
     live_folders, changed_or_new_folders = {}, set()
     cached_states = folder_cache.cache.copy()
 
-    for path in all_scanned_paths:
+    for path in target_folders_iter:
         norm_path = _norm_key(path)
         cached_states.pop(norm_path, None)
         try:
             stat_info = os.stat(path)
             live_folders[norm_path] = {'mtime': stat_info.st_mtime, 'ctime': stat_info.st_ctime}
+            
             cached_entry = folder_cache.get_folder_state(norm_path)
-            if not cached_entry or abs(_folder_time(stat_info, time_mode) - cached_entry.get('mtime', 0)) > 1e-6:
+            
+            is_changed = False
+            if not cached_entry:
+                is_changed = True
+            else:
+                time_diff = abs(_folder_time(stat_info, time_mode) - cached_entry.get('mtime', 0))
+                if time_diff > 1e-6:
+                    is_changed = True
+                
+                # [v3.1.x feature] 檢查數量要求 (例如設定從 8 張改為 10 張)
+                cached_count = cached_entry.get('scanned_count', 0)
+                if not is_changed and required_count > 0 and cached_count < required_count:
+                    is_changed = True
+
+            if is_changed:
                 changed_or_new_folders.add(norm_path)
-        except OSError:
-            continue
+                
+        except OSError: continue
             
     ghost_folders = set(cached_states.keys())
-    log_info(f"DFS 掃描完成。訪問: {stats['visited_dirs']}, 起始日剪枝: {stats['pruned_by_start']}, 結束日跳過: {stats['skipped_by_end']}")
-    log_info(f"符合時間的資料夾: {len(live_folders)}, 新/變更: {len(changed_or_new_folders)}, 幽靈資料夾: {len(ghost_folders)}")
+    
+    log_info(f"掃描判斷完成。即時: {len(live_folders)}, 變更(含增量): {len(changed_or_new_folders)}, 幽靈: {len(ghost_folders)}")
     return live_folders, changed_or_new_folders, ghost_folders
     
 def get_files_to_process(config_dict: Dict, 
@@ -575,7 +499,6 @@ def get_files_to_process(config_dict: Dict,
     if not os.path.isdir(root_folder): return [], {}
     
     enable_archive_scan = config_dict.get('enable_archive_scan', False) and ARCHIVE_SUPPORT_ENABLED
-    
     fmts = []
     if enable_archive_scan and archive_handler:
         for e in archive_handler.get_supported_formats():
@@ -583,6 +506,7 @@ def get_files_to_process(config_dict: Dict,
             if not e.startswith('.'): e = '.' + e
             fmts.append(e)
     supported_archive_exts = tuple(fmts)
+    image_exts = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff')
 
     folder_cache = FolderStateCacheManager(root_folder)
     
@@ -597,17 +521,33 @@ def get_files_to_process(config_dict: Dict,
             time_filter['start'] = datetime.datetime.strptime(start_str, "%Y-%m-%d") if start_str else None
             time_filter['end'] = datetime.datetime.strptime(end_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_str else None
         except (ValueError, TypeError):
-            log_error("時間篩選日期格式錯誤，將被忽略。"); time_filter['enabled'] = False
+            time_filter['enabled'] = False
 
     use_pruning = config_dict.get('enable_newest_first_pruning', True)
     time_mode = str(config_dict.get('folder_time_mode', 'mtime'))
-    live_folders, folders_to_scan_content, ghost_folders = _unified_scan_traversal(root_folder, excluded_paths, excluded_names, time_filter, folder_cache, progress_queue, control_events, use_pruning, time_mode)
+    
+    limit_enabled = config_dict.get('enable_extract_count_limit', True)
+    target_count = int(config_dict.get('extract_count', 8))
+    
+    qr_mode = config_dict.get('comparison_mode') == 'qr_detection'
+    if qr_mode and limit_enabled:
+        target_count = int(config_dict.get('qr_pages_per_archive', 10))
+        
+    first_scan_extract = int(config_dict.get('first_scan_extract_count', 0))
+
+    required_count = max(target_count, first_scan_extract)
+    if not limit_enabled:
+        required_count = 999999 
+
+    live_folders, folders_to_scan_content, ghost_folders = _unified_scan_traversal(
+        root_folder, excluded_paths, excluded_names, time_filter, folder_cache, 
+        progress_queue, control_events, use_pruning, time_mode, 
+        required_count
+    )
 
     new_folders = {f for f in live_folders if folder_cache.get_folder_state(f) is None}
     if new_folders:
         if time_filter['enabled']:
-            log_info(f"[新容器] 偵測到 {len(new_folders)} 個首次出現的資料夾，將根據時間窗口決定是否加入掃描。")
-            
             start, end = time_filter.get('start'), time_filter.get('end')
             folders_to_add = set()
             for f in new_folders:
@@ -618,42 +558,39 @@ def get_files_to_process(config_dict: Dict,
                     if start and dt < start: continue
                     if end and dt > end: continue
                     folders_to_add.add(f)
-                except OSError:
-                    continue
+                except OSError: continue
             folders_to_scan_content.update(folders_to_add)
         else:
-            log_info(f"[新容器] 偵測到 {len(new_folders)} 個首次出現的資料夾，將無條件加入本輪掃描。")
             folders_to_scan_content.update(new_folders)
 
+    # --- [v3.1.x] 智慧根目錄保護 (Smart Root Protection) ---
     root_norm = _norm_key(config_dict['root_scan_folder'])
     if root_norm in folders_to_scan_content:
-        log_warning("[保護] 根資料夾被標記為『變更』— 將改用保底模式（僅補快取缺口，不全面遞迴）。")
-        folders_to_scan_content.discard(root_norm)
+        has_loose_images = False
+        try:
+            with os.scandir(root_folder) as it:
+                for entry in it:
+                    if entry.is_file() and entry.name.lower().endswith(image_exts):
+                        has_loose_images = True
+                        break 
+        except OSError: pass
+        
+        if not has_loose_images:
+            log_info(f"[保護] 根資料夾變更，但未偵測到鬆散圖片，跳過根目錄本身的內容掃描。")
+            folders_to_scan_content.discard(root_norm)
+        else:
+            log_info(f"[智慧掃描] 根資料夾變更且包含圖片，執行掃描。")
 
-    def _prune_to_leaf_changed(changed_set: set[str]) -> set[str]:
-        changed = sorted(changed_set)
-        if not changed: return set()
-        keep = set(changed)
-        for i, p in enumerate(changed):
-            prefix = p + os.sep
-            for j in range(i + 1, len(changed)):
-                q = changed[j]
-                if q.startswith(prefix):
-                    keep.discard(p)
-                    break
-        return keep
-
-    orig_cnt = len(folders_to_scan_content)
-    folders_to_scan_content = _prune_to_leaf_changed(folders_to_scan_content)
-    if len(folders_to_scan_content) < orig_cnt:
-        log_info(f"[變更集縮減] 由 {orig_cnt} 夾縮至 {len(folders_to_scan_content)} 個最深變更夾，避免整棵樹重掃。")
-    
-    if control_events and control_events.get('cancel') and control_events['cancel'].is_set(): return [], {}
+    # --- [v3.0.1 Optimization] 剪枝優化已被移除 ---
+    # 因為我們改用淺層掃描 (Shallow Scan)，保留母目錄不會導致遞迴掃描整個目錄樹。
+    # 這樣可以確保母目錄底下的新散圖不會被忽略。
+    # -------------------------------------------------------------
 
     use_time_window = bool(time_filter.get('enabled') and (time_filter.get('start') or time_filter.get('end')))
     preserve = bool(config_dict.get('preserve_cache_across_time_windows', True))
     strict_img_prune = bool(config_dict.get('prune_image_cache_on_missing_folder', False))
 
+    # --- [v3.0.1 Logic] 幽靈資料夾清理邏輯 ---
     if ghost_folders:
         if use_time_window and preserve:
             truly_missing = [f for f in ghost_folders if not os.path.exists(f)]
@@ -669,16 +606,17 @@ def get_files_to_process(config_dict: Dict,
             folder_cache.remove_folders(list(ghost_folders))
             for folder in ghost_folders:
                 image_cache_manager.remove_entries_from_folder(folder)
+    # -------------------------------------------------------------
 
     unchanged_folders = set(live_folders.keys()) - folders_to_scan_content
     
     folders_needing_scan_due_to_empty_cache = set()
     if image_cache_manager._is_db_empty() and unchanged_folders:
          folders_needing_scan_due_to_empty_cache = unchanged_folders.copy()
-
+    
+    # 確保保底掃描也不要掃無圖片的根目錄
     if root_norm in folders_needing_scan_due_to_empty_cache:
         folders_needing_scan_due_to_empty_cache.discard(root_norm)
-        log_warning("[保護] 根夾缺快取但已跳過保底補掃；如需掃描請改選子資料夾或取消根夾保護。")
 
     if folders_needing_scan_due_to_empty_cache:
         def _prune_to_leaf_only(cands: Set[str]) -> Set[str]:
@@ -691,38 +629,16 @@ def get_files_to_process(config_dict: Dict,
                         keep.discard(p)
                         break
             return keep
-
+        
         pruned = _prune_to_leaf_only(folders_needing_scan_due_to_empty_cache)
-        if pruned != folders_needing_scan_due_to_empty_cache:
-            log_info(f"[保底裁剪] 從 {len(folders_needing_scan_due_to_empty_cache)} 夾裁成 {len(pruned)} 個葉節點夾以避免整樹補掃。")
-        folders_needing_scan_due_to_empty_cache = pruned
-
-        log_info(f"[保底] {len(folders_needing_scan_due_to_empty_cache)} 個未變更資料夾因在圖片快取中無記錄，已加入掃描。")
-        folders_to_scan_content.update(folders_needing_scan_due_to_empty_cache)
-        unchanged_folders -= folders_needing_scan_due_to_empty_cache
-
-    image_exts = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff')
-    
-    count = int(config_dict.get('extract_count', 8))
-    first_scan_extract = int(config_dict.get('first_scan_extract_count', 64))
-    enable_limit = config_dict.get('enable_extract_count_limit', True)
-    
-    qr_mode = config_dict.get('comparison_mode') == 'qr_detection'
-    if qr_mode and enable_limit:
-        count = int(config_dict.get('qr_pages_per_archive', 10))
-    qr_global_cap = int(config_dict.get('qr_global_cap', 20000))
+        log_info(f"[保底] {len(pruned)} 個未變更資料夾因圖片快取缺失加入掃描。")
+        folders_to_scan_content.update(pruned)
 
     scanned_files = []
     vpath_size_map = {}
     
     changed_container_cap = int(config_dict.get('changed_container_cap', 0) or 0)
-    depth_limit = int(config_dict.get('changed_container_depth_limit', 1))
-    start, end = time_filter.get('start'), time_filter.get('end')
     container_empty_mark = config_dict.get('container_empty_mark', True)
-
-    def _container_mtime(p: str) -> float:
-        try: return os.path.getmtime(p)
-        except OSError: return 0.0
 
     for folder in sorted(list(folders_to_scan_content)):
         if control_events and control_events.get('cancel') and control_events['cancel'].is_set(): break
@@ -730,14 +646,15 @@ def get_files_to_process(config_dict: Dict,
         before_len = len(scanned_files)
         temp_files_in_container = defaultdict(list)
         
-        for entry in _iter_scandir_recursively(folder, excluded_paths, excluded_names, control_events):
+        for entry in os.scandir(folder):
             try:
-                if use_time_window:
-                    st = entry.stat(follow_symlinks=False)
-                    file_ts = st.st_ctime if time_mode == 'ctime' else st.st_mtime
-                    file_dt = datetime.datetime.fromtimestamp(file_ts)
-                    if start and file_dt < start: continue
-                    if end and file_dt > end: continue
+                if entry.is_dir(follow_symlinks=False): continue
+                if time_filter['enabled'] and (time_filter.get('start') or time_filter.get('end')):
+                     st = entry.stat(follow_symlinks=False)
+                     ts = st.st_ctime if time_mode == 'ctime' else st.st_mtime
+                     dt = datetime.datetime.fromtimestamp(ts)
+                     if time_filter['start'] and dt < time_filter['start']: continue
+                     if time_filter['end'] and dt > time_filter['end']: continue
 
                 f_lower = entry.name.lower()
                 if enable_archive_scan and f_lower.endswith(supported_archive_exts):
@@ -748,35 +665,29 @@ def get_files_to_process(config_dict: Dict,
                 continue
         
         if changed_container_cap > 0 and len(temp_files_in_container) > changed_container_cap:
-            keep = sorted(temp_files_in_container.keys(), key=_container_mtime, reverse=True)[:changed_container_cap]
-            dropped = len(temp_files_in_container) - len(keep)
-            temp_files_in_container = {k: temp_files_in_container[k] for k in keep}
-            log_info(f"[變更夾容器上限] {folder} 僅保留 {len(keep)} 個近期容器，捨棄 {dropped} 個")
+             pass
 
         for container_path, files in temp_files_in_container.items():
             ext = os.path.splitext(container_path)[1].lower()
             if ext in supported_archive_exts:
                 try:
-                    all_vpaths = []
                     if archive_handler:
+                        all_vpaths = []
                         for arc_entry in archive_handler.iter_archive_images(container_path):
                             vpath = f"{VPATH_PREFIX}{arc_entry.archive_path}{VPATH_SEPARATOR}{arc_entry.inner_path}"
                             all_vpaths.append(vpath)
-                    all_vpaths.sort(key=_natural_sort_key)
-                    files.extend(all_vpaths)
-                except Exception as e:
-                    log_error(f"讀取壓縮檔失敗: {container_path}: {e}", True)
-                    continue
+                        files.extend(all_vpaths)
+                except Exception: continue
+            
             files.sort(key=_natural_sort_key)
             
             container_dir = _norm_key(os.path.dirname(container_path))
             is_new = container_dir in new_folders
             
-            if enable_limit:
-                take_n = first_scan_extract if is_new else count
-                if qr_mode:
-                    take_n = int(config_dict.get('qr_pages_per_archive', 10))
-                scanned_files.extend(files[-take_n:])
+            current_limit = max(target_count, first_scan_extract if is_new else 0)
+            
+            if limit_enabled:
+                scanned_files.extend(files[-current_limit:])
             else:
                 scanned_files.extend(files)
 
@@ -784,19 +695,16 @@ def get_files_to_process(config_dict: Dict,
         if norm_folder in live_folders: 
             added_for_this_folder = len(scanned_files) - before_len
             is_empty = (added_for_this_folder == 0)
-            if container_empty_mark:
-                folder_cache.update_folder_state(
-                    norm_folder,
-                    live_folders[norm_folder]['mtime'],
-                    live_folders[norm_folder]['ctime'],
-                    extra={'is_empty': is_empty}
-                )
-            else:
-                 folder_cache.update_folder_state(
-                    norm_folder,
-                    live_folders[norm_folder]['mtime'],
-                    live_folders[norm_folder]['ctime']
-                 )
+            
+            extra_state = {'scanned_count': required_count}
+            if container_empty_mark: extra_state['is_empty'] = is_empty
+            
+            folder_cache.update_folder_state(
+                norm_folder,
+                live_folders[norm_folder]['mtime'],
+                live_folders[norm_folder]['ctime'],
+                extra=extra_state
+            )
 
     if control_events and control_events.get('cancel') and control_events['cancel'].is_set(): return [], {}
     
@@ -813,40 +721,18 @@ def get_files_to_process(config_dict: Dict,
                          parent = _norm_key(os.path.dirname(arch_path))
                     else:
                         parent = _norm_key(os.path.dirname(p))
-                    
                     if parent in unchanged_folders:
                          cached_files.append(p)
                 except: continue
-        except sqlite3.Error as e:
-            log_error(f"讀取 SQLite 以恢復快取時出錯: {e}")
-            
+        except sqlite3.Error: pass
+
     final_file_list = scanned_files + cached_files
     folder_cache.save_cache()
     image_cache_manager.save_cache()
     
     unique_files = sorted(list(set(final_file_list)))
-
     if quarantine_list:
         unique_files = [f for f in unique_files if _norm_key(f) not in quarantine_list]
-    
-    def _path_mtime_for_cap(p: str) -> float:
-        try:
-            if _is_virtual_path(p):
-                arch_path, _ = _parse_virtual_path(p)
-                return os.path.getmtime(arch_path) if arch_path and os.path.exists(arch_path) else 0.0
-            else:
-                return os.path.getmtime(p) if os.path.exists(p) else 0.0
-        except Exception: return 0.0
-
-    mode = str(config_dict.get('comparison_mode', '')).lower()
-    global_cap = int(config_dict.get('global_extract_cap', 0) or 0)
-
-    if mode != 'qr_detection' and global_cap > 0 and len(unique_files) > global_cap:
-        unique_files.sort(key=_path_mtime_for_cap, reverse=True)
-        unique_files = unique_files[:global_cap]
-    elif qr_mode and not enable_limit and qr_global_cap > 0 and len(unique_files) > qr_global_cap:
-        unique_files.sort(key=_path_mtime_for_cap, reverse=True)
-        unique_files = unique_files[:qr_global_cap]
         
     log_info(f"檔案提取完成。掃描 {len(scanned_files)} 筆, 恢復 {len(cached_files)} 筆。總計: {len(unique_files)}")
     return unique_files, vpath_size_map

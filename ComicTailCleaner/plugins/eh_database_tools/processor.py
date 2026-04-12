@@ -1,13 +1,7 @@
 # ======================================================================
 # 檔案：plugins/eh_database_tools/processor.py
 # 目的：實現一個「前置處理器」，在主任務前同步 EH 資料庫
-# 版本：1.9.10 (穩定性修正：確保進程檢查絕不中斷主流程)
-# ======================================================================
-# v1.9.10 更新日誌:
-#   1. 【防呆機制】: 將 close_manga_app_if_running 函式內部邏輯完全包裹在
-#      try...except 區塊中，確保即使 psutil 發生錯誤或權限問題，
-#      程式也只會記錄警告並「強制繼續」執行下一步，解決卡住問題。
-#   2. 【狀態回饋】: 在檢查結束後立即更新 UI 進度，給予使用者明確的繼續訊號。
+# 版本：1.9.15 (資源管理：自動化完成後強制關閉 EMM 子進程)
 # ======================================================================
 
 from __future__ import annotations
@@ -28,40 +22,28 @@ import tempfile
 import subprocess
 import threading
 import queue
+import difflib
+import unicodedata
 
 from plugins.base_plugin import BasePlugin
 from utils import log_info, log_error, log_warning
 from config import DATA_DIR
 
 try:
-    import pyautogui, keyboard, psutil, pyperclip, ctypes
+    import keyboard, psutil, pyperclip, ctypes
     from ctypes import wintypes
-    from PIL import Image
     AUTOMATION_LIBS_AVAILABLE = True
 except ImportError:
     AUTOMATION_LIBS_AVAILABLE = False
 
-GLOBAL_ARTIST_MAP = {}
-GLOBAL_GROUP_MAP = {}
+# --- 全域變數 ---
+GLOBAL_ARTIST_MAP = {} 
+GLOBAL_GROUP_MAP = {}  
+GLOBAL_ARTIST_KEYS = [] 
+GLOBAL_GROUP_KEYS = []  
+
 summary = None
 PLUGIN_ROOT_PATH = os.path.dirname(os.path.abspath(__file__))
-
-PAGE_LOAD_DELAY = 2.0;
-SEARCH_BOX_X_OFFSET = -100; TITLE_X_OFFSET = -100; TITLE_Y_OFFSET = -20
-MAIN_SEARCH_ICON_IMG, BOOKMARK_ICON_IMG, BOOKMARK_ICON_READY_IMG, RESCAN_BUTTON_IMG, CLOSE_BUTTON_IMG, PAGE_END_IMG, CLEAR_SEARCH_BUTTON_IMG, NO_COVER_IMG = 'main_search_icon.png', 'bookmark_icon.png', 'bookmark_icon_ready.png', 'rescan_button.png', 'close_button.png', 'page_end.png', 'clear_search_button.png', 'no_cover.png'
-
-SPEED_PRESETS = {
-    "safe":   {"PAUSE": 0.35, "CLICK": 0.30, "PAGEDOWN": 0.15, "AFTER_SCROLL": 0.25},
-    "normal": {"PAUSE": 0.20, "CLICK": 0.18, "PAGEDOWN": 0.10, "AFTER_SCROLL": 0.15},
-    "fast":   {"PAUSE": 0.05, "CLICK": 0.08, "PAGEDOWN": 0.08, "AFTER_SCROLL": 0.10},
-}
-
-def _init_automation_speed_from_config(config: dict):
-    speed = (config or {}).get("automation_speed", "fast").strip().lower()
-    timing = SPEED_PRESETS.get(speed, SPEED_PRESETS["fast"])
-    if AUTOMATION_LIBS_AVAILABLE:
-        pyautogui.PAUSE = timing["PAUSE"]
-    return timing
 
 class ExecutionSummary:
     def __init__(self):
@@ -98,52 +80,85 @@ def migrate_to_v20_structure(db_path: str):
             conn.executemany("UPDATE Mangas SET filepath_normalized = ? WHERE id = ?", [(normalize_path(path), pid) for pid, path in records_to_migrate])
             log_info("  -> 路徑遷移完成。")
 
+def smart_normalize(text: str) -> str:
+    if not text: return ""
+    return unicodedata.normalize('NFKC', text).lower().strip()
+
 def load_maps_from_ast_json(filepath: str) -> Tuple[Dict[str, str], Dict[str, str]]:
-    def first_text_in(obj: Any) -> Union[str, None]:
-        if isinstance(obj, dict):
-            if obj.get("type") == "text" and isinstance(obj.get("text"), str): return obj["text"]
-            for v in obj.values():
-                found = first_text_in(v)
-                if isinstance(found, str) and found.strip(): return found
-        elif isinstance(obj, list):
+    def extract_text_recursive(obj: Any) -> Union[str, None]:
+        if isinstance(obj, str): return obj
+        if isinstance(obj, list):
             for item in obj:
-                found = first_text_in(item)
-                if isinstance(found, str) and found.strip(): return found
+                res = extract_text_recursive(item)
+                if res: return res
+        if isinstance(obj, dict):
+            if "name" in obj and isinstance(obj["name"], str): return obj["name"]
+            for v in obj.values():
+                res = extract_text_recursive(v)
+                if res: return res
         return None
+
     artist_map, group_map = {}, {}
     try:
         with open(filepath, "r", encoding="utf-8") as f: root = json.load(f)
-        sections = root.get("data")
-        if not isinstance(sections, list): return {}, {}
-        for ns in ("artist", "group"):
-            section = next((s for s in sections if isinstance(s, dict) and s.get("namespace") == ns), None)
-            if not section: continue
-            data_block = section.get("data")
-            if not isinstance(data_block, dict): continue
-            target_map = artist_map if ns == "artist" else group_map
-            for raw_tag, entry_data in data_block.items():
-                if not isinstance(entry_data, dict): continue
-                key_japanese = first_text_in(entry_data.get("name"))
-                value_romaji = raw_tag.replace('_', ' ').title()
-                if isinstance(key_japanese, str) and key_japanese.strip() and value_romaji:
-                    target_map[key_japanese.strip().lower()] = value_romaji
-    except Exception as e: log_error(f"[EH 外掛] 解析 EhTag 資料庫時發生錯誤: {e}"); return {}, {}
+        is_ast = "data" in root and isinstance(root["data"], list)
+        
+        if is_ast:
+            sections = root.get("data")
+            for ns in ("artist", "group"):
+                section = next((s for s in sections if isinstance(s, dict) and s.get("namespace") == ns), None)
+                if not section: continue
+                data_block = section.get("data")
+                if not isinstance(data_block, dict): continue
+                target_map = artist_map if ns == "artist" else group_map
+                
+                for raw_tag, entry_data in data_block.items():
+                    value_romaji = raw_tag.replace('_', ' ').title()
+                    key_japanese = extract_text_recursive(entry_data.get("name"))
+                    if key_japanese and key_japanese.strip():
+                        target_map[smart_normalize(key_japanese)] = value_romaji
+    except Exception as e: 
+        log_error(f"[EH 外掛] 解析 EhTag 資料庫時發生錯誤: {e}")
+        return {}, {}
     return artist_map, group_map
 
 def load_translation_maps(config: Dict):
-    global GLOBAL_ARTIST_MAP, GLOBAL_GROUP_MAP
+    global GLOBAL_ARTIST_MAP, GLOBAL_GROUP_MAP, GLOBAL_ARTIST_KEYS, GLOBAL_GROUP_KEYS
     log_info("[EH 外掛] 正在載入 EhTag 雙軌翻譯資料庫...")
     ehtag_db_dir = config.get('eh_syringe_directory')
     if not ehtag_db_dir or not os.path.isdir(ehtag_db_dir):
         log_warning("[EH 外掛] 未設定有效的 EhTag DB 路徑，將跳過翻譯與 CSV 功能。"); return
-    db_path = os.path.join(ehtag_db_dir, 'db.ast.json')
-    if not os.path.exists(db_path): log_error(f"[EH 外掛] 找不到資料庫檔案: {db_path}"); return
+    
+    db_candidates = ['db.ast.json', 'db.json', 'db.text.json']
+    db_path = None
+    for cand in db_candidates:
+        p = os.path.join(ehtag_db_dir, cand)
+        if os.path.exists(p):
+            db_path = p; break
+            
+    if not db_path: 
+        log_error(f"[EH 外掛] 找不到資料庫檔案 (搜尋順序: {db_candidates})"); return
+        
+    log_info(f"  -> 讀取資料庫: {os.path.basename(db_path)}")
     GLOBAL_ARTIST_MAP, GLOBAL_GROUP_MAP = load_maps_from_ast_json(db_path)
+    GLOBAL_ARTIST_KEYS = list(GLOBAL_ARTIST_MAP.keys())
+    GLOBAL_GROUP_KEYS = list(GLOBAL_GROUP_MAP.keys())
+    
     log_info(f"  -> Artist 資料庫載入完成: {len(GLOBAL_ARTIST_MAP)} 筆")
     log_info(f"  -> Group 資料庫載入完成: {len(GLOBAL_GROUP_MAP)} 筆")
-
+# === 請在這裡插入 is_romaji_candidate ===
 def is_romaji_candidate(text: str) -> bool:
+    # 簡單判斷：如果大部分字符是 ASCII，則視為羅馬拼音候選
     return all(ord(c) < 128 for c in text.replace(' ', '').replace('_', '').replace('-', ''))
+# ========================================
+def fuzzy_lookup(query: str, mapping: Dict[str, str], keys: List[str], cutoff: float = 0.8) -> Optional[str]:
+    norm_query = smart_normalize(query)
+    if not norm_query: return None
+    if norm_query in mapping: return mapping[norm_query]
+    if len(norm_query) > 2:
+        matches = difflib.get_close_matches(norm_query, keys, n=1, cutoff=cutoff)
+        if matches: return mapping[matches[0]]
+    return None
 
 def analyze_title_tags(title: str) -> Tuple[str, str]:
     if not title: return "", ""
@@ -151,25 +166,30 @@ def analyze_title_tags(title: str) -> Tuple[str, str]:
     matches = re.findall(r'\[([^\]]+)\]', title)
     for content in matches:
         content = content.strip(); content_lower = content.lower()
-        if content_lower in ['chinese', 'dl版', '中国翻訳', '翻訳', '無修正', 'uncensored']: continue
+        if content_lower in ['chinese', 'dl版', '中国翻訳', '翻訳', '無修正', 'uncensored', 'eng', 'english']: continue
         inner_match = re.search(r'[(（]([^)）]+)[)）]', content)
         if inner_match:
             inner_artist = inner_match.group(1).strip()
             outer_group = re.split(r'[(（]', content)[0].strip()
             if not artist_val:
-                artist_val = GLOBAL_ARTIST_MAP.get(inner_artist.lower())
-                if not artist_val and is_romaji_candidate(inner_artist): artist_val = inner_artist
+                artist_val = fuzzy_lookup(inner_artist, GLOBAL_ARTIST_MAP, GLOBAL_ARTIST_KEYS)
+                if not artist_val and is_romaji_candidate(inner_artist): artist_val = inner_artist.title()
+                if not artist_val: artist_val = inner_artist
             if not group_val:
-                 group_val = GLOBAL_GROUP_MAP.get(outer_group.lower())
-                 if not group_val and is_romaji_candidate(outer_group) and outer_group: group_val = outer_group
+                 group_val = fuzzy_lookup(outer_group, GLOBAL_GROUP_MAP, GLOBAL_GROUP_KEYS)
+                 if not group_val and is_romaji_candidate(outer_group): group_val = outer_group.title()
+                 if not group_val: group_val = outer_group
         else:
-            if not artist_val and content_lower in GLOBAL_ARTIST_MAP:
-                artist_val = GLOBAL_ARTIST_MAP[content_lower]; continue
-            if not group_val and content_lower in GLOBAL_GROUP_MAP:
-                group_val = GLOBAL_GROUP_MAP[content_lower]; continue
+            mapped_artist = fuzzy_lookup(content, GLOBAL_ARTIST_MAP, GLOBAL_ARTIST_KEYS)
+            if mapped_artist:
+                if not artist_val: artist_val = mapped_artist; continue 
+            mapped_group = fuzzy_lookup(content, GLOBAL_GROUP_MAP, GLOBAL_GROUP_KEYS)
+            if mapped_group:
+                if not group_val: group_val = mapped_group; continue
             if is_romaji_candidate(content):
-                if not artist_val: artist_val = content
-                elif not group_val: group_val = content
+                if not artist_val: artist_val = content.title()
+                elif not group_val: group_val = content.title()
+            elif not artist_val: artist_val = content
     return artist_val, group_val
 
 def is_folder_effectively_empty(folder_path: str) -> bool:
@@ -230,14 +250,33 @@ def update_database_records(db_path, records_to_add=[], paths_to_soft_delete=[],
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_filepath_normalized ON Mangas(filepath_normalized)")
+        
         if records_to_add:
             cursor.executemany("INSERT OR IGNORE INTO Mangas (id, title, hash, filepath, filepath_normalized, type, mtime, date, status, url, tags, rating, exist, createdAt, updatedAt) VALUES (:id, :title, :hash, :filepath, :filepath_normalized, :type, :mtime, :date, :status, :url, :tags, :rating, :exist, :createdAt, :updatedAt)", records_to_add)
             summary.added += cursor.rowcount
+            
         if paths_to_soft_delete:
-            cursor.executemany("UPDATE Mangas SET status = ?, updatedAt = datetime('now') WHERE filepath_normalized = ?", [('檔案已被刪除', path) for path in paths_to_soft_delete])
+            # v-MOD: 根據您的方案 B，直接執行 DELETE 讓 EMM 總計數下降
+            # 優先嘗試以正規化路徑刪除
+            cursor.executemany(
+                "DELETE FROM Mangas WHERE filepath_normalized = ?",
+                [(path,) for path in paths_to_soft_delete]
+            )
+            affected = cursor.rowcount
+            
+            # 備援：若沒刪到，嘗試用原始路徑（相容斜線差異）
+            if affected < len(paths_to_soft_delete):
+                cursor.executemany(
+                    "DELETE FROM Mangas WHERE REPLACE(REPLACE(filepath, '/', '\\'), '\\\\', '\\') = ?",
+                    [(path.replace('/', '\\'),) for path in paths_to_soft_delete]
+                )
             summary.soft_deleted += cursor.rowcount
         if paths_to_restore:
-            cursor.executemany("UPDATE Mangas SET status = ?, updatedAt = datetime('now') WHERE filepath_normalized = ?", [('non-tag', path) for path in paths_to_restore])
+            # v-MOD: 同時還原 exist=1
+            cursor.executemany(
+                "UPDATE Mangas SET exist = 1, status = ?, updatedAt = datetime('now') WHERE filepath_normalized = ?",
+                [('non-tag', path) for path in paths_to_restore]
+            )
             summary.restored += cursor.rowcount
 
 def export_tag_failed_to_csv(config: Dict):
@@ -247,12 +286,8 @@ def export_tag_failed_to_csv(config: Dict):
     if not os.path.exists(db_path):
         log_warning("[EH 外掛] 找不到資料庫，無法匯出 'tag-failed' 項目。"); return
 
-    # === v-MOD START: 優先使用設定中的路徑 ===
-    output_csv_path = config.get('eh_csv_path')
-    if not output_csv_path:
-        # 保底：如果設定檔沒值，才用 data/tagfailed.csv (理論上 plugin_gui 會填入預設值)
-        output_csv_path = os.path.join(DATA_DIR, 'tagfailed.csv')
-    # === v-MOD END ===
+    # 使用 config 中的路徑（由 plugin_gui 寫死為 PLUGIN_BASE_DIR/tagfailed.csv）
+    output_csv_path = config.get('eh_csv_path', os.path.join(DATA_DIR, 'tagfailed.csv'))
 
     try:
         with sqlite3.connect(db_path) as conn:
@@ -282,8 +317,7 @@ def export_tag_failed_to_csv(config: Dict):
         log_error(f"[EH 外掛] 讀取資料庫以匯出 'tag-failed' 項目時發生錯誤: {e}")
     except Exception as e:
         log_error(f"[EH 外掛] 匯出 'tag-failed' CSV 時發生未知錯誤: {e}", include_traceback=True)
-        
-        
+
 def run_full_sync_headless(config: Dict, progress_queue: Optional[any]):
     _update_progress = lambda text, value=None: progress_queue.put({'type': 'progress' if value is not None else 'text', 'text': text, 'value': value}) if progress_queue else None
     log_info("[EH 外掛] 開始執行資料庫完整同步...")
@@ -471,198 +505,56 @@ def update_csv_dashboard(json_data: list, csv_path: str):
     if _atomic_write_csv_rows(rows, csv_path): log_info(f"[EH 外掛] CSV 儀表板更新完成：{csv_path}（寫入 {len(changed_rows)} 筆變更）")
     else: _append_pending_rows(changed_rows); log_warning(f"[EH 外掛] CSV 被鎖定，已將 {len(changed_rows)} 筆變更寫入 pending，待下次自動合併。")
 
-def get_image_path(image_name: str) -> str:
-    plugin_assets = os.path.join(os.path.dirname(__file__), 'assets', image_name)
-    if os.path.exists(plugin_assets): return plugin_assets
-    project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    return os.path.join(project_root, 'assets', image_name)
-
-try:
-    import numpy as np, cv2
-    _HAS_CV2 = True
-except Exception: _HAS_CV2 = False
-
-_DEFAULT_CONFIDENCE = 0.85; _DEFAULT_TIMEOUT = 3.0; _SCALE_SET = [1.25, 1.10, 1.00, 0.90, 0.80]
-
-def _pil_open_strict(path: str) -> Image.Image | None:
-    try: return Image.open(path).convert('RGB')
-    except Exception: return None
-
-def _cv2_read_unicode(path: str):
-    if not _HAS_CV2: return None
-    try:
-        data = np.fromfile(path, dtype=np.uint8); img = cv2.imdecode(data, cv2.IMREAD_COLOR)
-        return img
-    except Exception: return None
-
-def _to_cv(bgr_or_pil):
-    if not _HAS_CV2: return None
-    if isinstance(bgr_or_pil, Image.Image):
-        rgb = np.array(bgr_or_pil); return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    return bgr_or_pil
-
-def _match_template_cv(screen_bgr, needle_bgr, confidence: float):
-    if not _HAS_CV2: return None
-    H, W = needle_bgr.shape[:2]; best = None
-    for scale in _SCALE_SET:
-        try: resized = cv2.resize(needle_bgr, (int(W*scale), int(H*scale)), interpolation=cv2.INTER_AREA)
-        except Exception: continue
-        for use_gray in (False, True):
-            src = cv2.cvtColor(screen_bgr, cv2.COLOR_BGR2GRAY) if use_gray else screen_bgr
-            tpl = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY) if use_gray else resized
-            res = cv2.matchTemplate(src, tpl, cv2.TM_CCOEFF_NORMED)
-            min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
-            if max_val >= confidence:
-                h, w = tpl.shape[:2]; return (max_loc[0] + w//2, max_loc[1] + h//2)
-            if (best is None) or (max_val > best[0]): best = (max_val, max_loc, tpl.shape[1], tpl.shape[0])
-    return None
-
-def _pillow_exact_match(screen_img: Image.Image, needle_img: Image.Image):
-    try:
-        import pyscreeze; pyscreeze.useOpenCV = False
-        loc = pyautogui.locateCenterOnScreen(needle_img)
-        return (loc.x, loc.y) if loc else None
-    except Exception: return None
-
-class _ScreenFinder:
-    def __init__(self):
-        try:
-            import pyscreeze; pyscreeze.useOpenCV = bool(_HAS_CV2)
-        except Exception: pass
-    def _screenshot_cv(self):
-        if not _HAS_CV2: return None
-        return _to_cv(pyautogui.screenshot())
-    def locate(self, image_name: str, confidence: float = _DEFAULT_CONFIDENCE, timeout: float = _DEFAULT_TIMEOUT):
-        path = get_image_path(image_name)
-        if not os.path.exists(path): log_error(f"[EH 自動化] 找不到圖片資產: {path}"); return None
-        needle_pil = _pil_open_strict(path)
-        if needle_pil is None: log_error(f"[EH 自動化] 圖片格式不支援或已損壞: {path}"); return None
-        start = time.time()
-        while time.time() - start < timeout:
-            try:
-                loc = pyautogui.locateCenterOnScreen(needle_pil, confidence=confidence) if _HAS_CV2 else pyautogui.locateCenterOnScreen(needle_pil)
-                if loc: return (loc.x, loc.y)
-            except Exception: break
-            time.sleep(0.25)
-            if _HAS_CV2:
-                screen_bgr = self._screenshot_cv(); needle_bgr = _to_cv(needle_pil)
-                if screen_bgr is not None and needle_bgr is not None:
-                    if pt := _match_template_cv(screen_bgr, needle_bgr, confidence): return pt
-            if pt := _pillow_exact_match(pyautogui.screenshot(), needle_pil): return pt
-        return None
-    def click(self, image_name: str, confidence: float = _DEFAULT_CONFIDENCE, timeout: float = _DEFAULT_TIMEOUT, delay: float = 0.4):
-        if pt := self.locate(image_name, confidence=confidence, timeout=timeout):
-            try: pyautogui.click(pt[0], pt[1]); time.sleep(delay); return True
-            except Exception as e: log_warning(f"[EH 自動化] click 失敗: {e}")
-        return False
-
-SCREEN = _ScreenFinder()
-
-def find_element(image_name: str, confidence: float = _DEFAULT_CONFIDENCE, timeout: float = _DEFAULT_TIMEOUT):
-    if pt := SCREEN.locate(image_name, confidence=confidence, timeout=timeout):
-        class _P: pass
-        o = _P(); o.x, o.y = pt[0], pt[1]
-        return o
-    return None
-
-def find_and_click(image_name: str, confidence: float = _DEFAULT_CONFIDENCE, timeout: float = _DEFAULT_TIMEOUT) -> bool:
-    return SCREEN.click(image_name, confidence=confidence, timeout=timeout, delay=0.5)
-
-def activate_window_by_pid(pid: int) -> bool:
-    if not AUTOMATION_LIBS_AVAILABLE: return False
-    found_hwnd = None
-    def foreach_window(hwnd, lParam):
-        nonlocal found_hwnd
-        if ctypes.windll.user32.IsWindowVisible(hwnd):
-            lpdwProcessId = ctypes.c_ulong()
-            ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(lpdwProcessId))
-            if lpdwProcessId.value == pid: found_hwnd = hwnd; return False
-        return True
-    try:
-        EnumWindows = ctypes.windll.user32.EnumWindows
-        WINFUNCTYPE = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
-        EnumWindows(WINFUNCTYPE(foreach_window), 0)
-        if found_hwnd:
-            ctypes.windll.user32.ShowWindow(found_hwnd, 3)
-            ctypes.windll.user32.SetForegroundWindow(found_hwnd)
-            log_info(f"  -> 已成功最大化並激活 PID 為 {pid} 的視窗。"); return True
-        else: log_warning(f"  -> 找不到 PID 為 {pid} 的可見視窗。"); return False
-    except Exception as e: log_error(f"  -> 激活視窗時發生錯誤: {e}"); return False
-
-def _get_current_hkl():
-    if not AUTOMATION_LIBS_AVAILABLE: return None
-    try: return ctypes.windll.user32.GetKeyboardLayout(ctypes.windll.user32.GetWindowThreadProcessId(ctypes.windll.user32.GetForegroundWindow(), None))
-    except Exception: return None
-
-def ensure_english_input():
-    if not AUTOMATION_LIBS_AVAILABLE: return
-    try: ctypes.windll.user32.ActivateKeyboardLayout(ctypes.windll.user32.LoadKeyboardLayoutA(b"00000409", 1), 256)
-    except Exception as e: log_warning(f"切換至英文輸入法失敗: {e}")
-
-def restore_keyboard_layout(original_hkl):
-    if original_hkl and AUTOMATION_LIBS_AVAILABLE:
-        try: ctypes.windll.user32.ActivateKeyboardLayout(original_hkl, 256)
-        except Exception as e: log_warning(f"還原輸入法失敗: {e}")
-
 _LOG_DIR = os.path.join(os.path.dirname(__file__), "logs"); os.makedirs(_LOG_DIR, exist_ok=True)
 _CHILD_LOG = os.path.join(_LOG_DIR, "eh_manager_child.log"); _FILTER_TAGS = ("EBUSY", "Saved", "unlink", "Error", "WARN", "scanned", "Digest")
 
-def _spawn_eh_manager(app_path: str):
+
+def _spawn_eh_manager(app_path: str, port: int):
     try:
-        p = subprocess.Popen([app_path], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW)
-    except Exception as e: log_error(f"[EH 自動化] 無法啟動應用程式：{e}"); return None
-    qlines = queue.Queue()
-    def _reader():
-        with open(_CHILD_LOG, "a", encoding="utf-8") as fout:
-            for line in iter(p.stdout.readline, ""):
-                fout.write(line); fout.flush()
-                if any(tag in line for tag in _FILTER_TAGS): qlines.put(line.rstrip("\n"))
-    t = threading.Thread(target=_reader, daemon=True); t.start()
-    def _drain():
-        while True:
-            try: log_info(f"[EHM] {qlines.get(timeout=0.2)}")
-            except queue.Empty:
-                if p.poll() is not None and qlines.empty(): break
-    threading.Thread(target=_drain, daemon=True).start()
-    return p
+        # DETACHED_PROCESS = 0x00000008
+        # CREATE_NEW_PROCESS_GROUP = 0x00000200
+        # 這些 flag 確保 EMM 成為獨立進程
+        creation_flags = 0x00000008 | 0x00000200
+        
+        # 注意：為了脫鉤，我們必須放棄 stdout=subprocess.PIPE
+        # 將輸出導向 devnull (空)，避免 CTC 關閉時 EMM 因為寫入 log 失敗而崩潰
+        with open(os.devnull, 'w') as devnull:
+            p = subprocess.Popen(
+                [app_path, f'--remote-debugging-port={port}', '--remote-allow-origins=*'],
+                stdout=devnull, 
+                stderr=devnull,
+                close_fds=True, # 關閉繼承的檔案描述符
+                creationflags=creation_flags
+            )
+            
+        log_info(f"[EH 自動化] 已獨立啟動應用程式 (PID: {p.pid}，CDP 連接埠: {port})")
+        return p
+        
+    except Exception as e:
+        log_error(f"[EH 自動化] 無法啟動應用程式：{e}")
+        return None
 
 def close_manga_app_if_running(config: Dict):
-    """
-    檢查並關閉目標應用程式。
-    v1.9.10: 使用 try...except 包裹，確保即使出錯也不會中斷主程式。
-    """
     if not AUTOMATION_LIBS_AVAILABLE: return
     manga_app_path = config.get('eh_manga_manager_path', '')
-    if not manga_app_path:
-        log_warning("[EH 自動化] 設定中未提供 manga_manager_path，跳過關閉程序。"); return
-    
+    if not manga_app_path: log_warning("[EH 自動化] 設定中未提供 manga_manager_path，跳過關閉程序。"); return
     target_app_name = os.path.basename(manga_app_path)
-    log_info(f"[EH 自動化] 檢查 '{target_app_name}' 執行狀態...") 
     
+    log_info(f"[EH 自動化] 檢查 '{target_app_name}' 執行狀態...") 
     try:
         found_count = 0
         for proc in psutil.process_iter(['name', 'pid']):
             try:
                 if proc.info['name'] and proc.info['name'].lower() == target_app_name.lower():
                     log_info(f"  -> 發現進程 (PID: {proc.pid})，正在關閉...")
-                    try:
-                        proc.terminate()
-                        proc.wait(timeout=3)
-                    except (psutil.NoSuchProcess, psutil.TimeoutExpired):
-                        proc.kill()
-                        proc.wait(timeout=3)
+                    try: proc.terminate(); proc.wait(timeout=3)
+                    except (psutil.NoSuchProcess, psutil.TimeoutExpired): proc.kill(); proc.wait(timeout=3)
                     found_count += 1
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-        
-        if found_count > 0:
-            log_info(f"  -> 已關閉 {found_count} 個實例。")
-        else:
-            log_info(f"  -> 未發現運行中的應用程式，無需操作。")
-            
+            except (psutil.NoSuchProcess, psutil.AccessDenied): continue
+        if found_count > 0: log_info(f"  -> 已關閉 {found_count} 個實例。")
+        else: log_info(f"  -> 未發現運行中的應用程式，無需操作。")
     except Exception as e:
         log_warning(f"[EH 自動化] 檢查進程時發生異常 (已忽略): {e}")
-        # 這裡不拋出異常，確保主程式可以繼續執行
 
 def count_untagged_manga(db_path: str) -> int:
     if not os.path.exists(db_path): return 0
@@ -673,74 +565,252 @@ def count_untagged_manga(db_path: str) -> int:
     except sqlite3.Error: return 0
 
 def run_automation_suite_headless(config: Dict, progress_queue: Optional[any], control_events: Dict):
-    if not AUTOMATION_LIBS_AVAILABLE: log_error("[EH 外掛] 缺少 UI 自動化函式庫，無法執行元數據更新。"); return
+    import urllib.request, urllib.error, json, time
     _update_progress = lambda text, value=None: progress_queue.put({'type': 'progress' if value is not None else 'text', 'text': text, 'value': value}) if progress_queue else None
-    timing = _init_automation_speed_from_config(config)
-    CLICK_DELAY, PAGEDOWN_DELAY, AFTER_SCROLL = timing["CLICK"], timing["PAGEDOWN"], timing["AFTER_SCROLL"]
-
-    log_info("[EH 外掛] UI 自動化流程開始...")
+    
+    log_info("[EH 自動化] CDP 無頭自動化流程開始...")
     db_path = os.path.join(config.get('eh_data_directory'), "database.sqlite")
     task_limit = count_untagged_manga(db_path)
-    summary.tasks_total = task_limit
+    if 'summary' in globals(): summary.tasks_total = task_limit
     
     if task_limit == 0:
-        log_info("[EH 外掛] 資料庫中沒有 non-tag 項目，無需執行 UI 自動化。"); _update_progress("資料庫無需更新。", 100); return
+        log_info("[EH 外掛] 資料庫中沒有 non-tag 項目，無需執行 UI 自動化。")
+        _update_progress("資料庫無需更新。", 100)
+        return
 
     _update_progress(f"檢測到 {task_limit} 個項目需要更新元數據...", 55)
     
     app_path = config.get("eh_manga_manager_path")
-    proc = _spawn_eh_manager(app_path)
-    if not proc: _update_progress("❌ 程式啟動失敗。", 100); return
-    app_pid = proc.pid
-    time.sleep(float(config.get('automation_page_load_delay', 2.0)) * 3)
+    if not app_path or not os.path.exists(app_path):
+        log_error("[EH 自動化] EMM 執行檔路徑設定錯誤！")
+        _update_progress("❌ 自動化失敗: 找不到 EMM 執行檔", 100)
+        return
 
-    if not activate_window_by_pid(app_pid):
-        log_error("[EH 自動化] 視窗激活失敗，自動化中止。"); _update_progress("❌ 錯誤: 程式視窗激活失敗。", 100); return
+    # Ensure previous instances are closed to avoid debugging port conflicts and stuck state
+    close_manga_app_if_running(config)
 
-    original_hkl = None
+    import socket
+    cdp_port = 9222
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('127.0.0.1', 0))
+        cdp_port = s.getsockname()[1]
+
+    proc = _spawn_eh_manager(app_path, cdp_port)
+    if not proc: 
+        _update_progress("❌ 程式啟動失敗。", 100)
+        return
+
+    _update_progress(f"等待 EMM 服務啟動並開放 CDP 連接埠 ({cdp_port})...", 60)
+    
+    ws_url = None
+    url = f"http://127.0.0.1:{cdp_port}/json"
+    started_time = time.time()
+    
+    # EMM 可以載入很久，給予 120 秒等待 CDP 開放
+    while time.time() - started_time < 120:
+        if control_events and control_events.get('cancel') and control_events['cancel'].is_set():
+             log_info("[EH 自動化] 收到取消訊號。"); return
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=2) as response:
+                pages = json.loads(response.read().decode('utf-8'))
+                for page in pages:
+                    if page.get("type") == "page" and "webSocketDebuggerUrl" in page:
+                        ws_url = page["webSocketDebuggerUrl"]
+                        break
+            if ws_url: break
+        except Exception: pass
+        time.sleep(2)
+
+    if not ws_url:
+        log_error(f"[EH CDP] 無法連接到 EMM 的偵錯連接埠 ({cdp_port})。")
+        _update_progress("❌ 連接 EMM 失敗 (無法讀取 CDP)", 100)
+        return
+
+    _update_progress("成功連接 EMM！準備注入操作腳本...", 65)
+    
     try:
-        original_hkl = _get_current_hkl()
-        _update_progress("正在定位 UI 元素...", 60)
-        search_icon = find_element(MAIN_SEARCH_ICON_IMG, timeout=10)
-        if not search_icon: log_error("[EH 自動化] 找不到主搜尋框錨點！"); _update_progress("❌ 錯誤: 找不到主搜尋框。"); return
+        from websocket import create_connection
+        class CDPClient:
+            def __init__(self, url):
+                self.ws = create_connection(url)
+                self.msg_id = 0
+            
+            def evaluate(self, expression):
+                self.msg_id += 1
+                payload = {"id": self.msg_id, "method": "Runtime.evaluate", "params": {"expression": expression, "returnByValue": True, "awaitPromise": True}}
+                self.ws.send(json.dumps(payload))
+                while True:
+                    resp = json.loads(self.ws.recv())
+                    if "id" in resp and resp["id"] == self.msg_id:
+                        if "exceptionDetails" in resp.get("result", {}):
+                            raise Exception(f"CDP Evaluate Error: {resp['result']['exceptionDetails']}")
+                        return resp["result"].get("result", {}).get("value")
+            
+            def execute(self, method, params=None):
+                self.msg_id += 1
+                payload = {"id": self.msg_id, "method": method, "params": params or {}}
+                self.ws.send(json.dumps(payload))
+                while True:
+                    resp = json.loads(self.ws.recv())
+                    if "id" in resp and resp["id"] == self.msg_id:
+                        if "error" in resp:
+                            raise Exception(f"CDP Execute Error: {resp['error']}")
+                        return resp.get("result", {})
+                        
+            def close(self): self.ws.close()
         
-        pyautogui.click(search_icon.x + SEARCH_BOX_X_OFFSET, search_icon.y)
-        ensure_english_input(); pyperclip.copy('"non-tag"$'); pyautogui.hotkey('ctrl', 'v'); pyautogui.press('enter')
-
-        log_info("[EH 自動化] 已執行搜尋，正在主動輪詢等待 UI 結果出現...")
-        first_target = None; wait_start_time = time.time()
-        while time.time() - wait_start_time < 15:
-            first_target = find_element(BOOKMARK_ICON_IMG, timeout=0.5) or find_element(BOOKMARK_ICON_READY_IMG, timeout=0.5)
-            if first_target: log_info(f"[EH 自動化] 目標已出現！(耗時 {time.time() - wait_start_time:.2f} 秒)"); break
-            time.sleep(0.5)
-
-        if not first_target: log_warning("[EH 自動化] 等待超時 (15秒)，仍未在螢幕上找到任何 non-tag 項目，流程結束。"); find_and_click(CLEAR_SEARCH_BUTTON_IMG); return
-
-        _update_progress("正在開始自動化迴圈...", 65)
-        pyautogui.click(first_target.x + TITLE_X_OFFSET, first_target.y + TITLE_Y_OFFSET)
-        time.sleep(PAGE_LOAD_DELAY)
+        client = CDPClient(ws_url)
         
-        for i in range(task_limit):
-            if control_events['cancel'].is_set(): log_info("[EH 自動化] 收到取消訊號，流程終止。"); break
-            while control_events['pause'].is_set(): time.sleep(0.2)
+        log_info("[EH CDP] 正在確保介面載入並 Focus 搜尋框 (階段 1)...")
+        js_focus = """
+        (async () => {
+            let retries = 0;
+            let isReady = false;
+            let searchInput = null;
             
-            summary.tasks_processed = i + 1
-            progress_val = 65 + int(30 * (summary.tasks_processed / task_limit))
-            _update_progress(f"正在處理第 {summary.tasks_processed}/{task_limit} 本...", progress_val)
-            
-            if find_and_click(RESCAN_BUTTON_IMG, timeout=5): time.sleep(CLICK_DELAY)
-            if summary.tasks_processed >= task_limit: break
-            
-            pyautogui.press('pagedown'); time.sleep(PAGEDOWN_DELAY); time.sleep(AFTER_SCROLL)
-            
-            if find_element(PAGE_END_IMG, timeout=1): log_info("[EH 自動化] 偵測到頁面末端，提前結束。"); break
+            while (retries < 60) { // Wait up to 30 seconds for initial DB load
+                searchInput = document.querySelector('.search-input input') || document.querySelector('input[type="text"]');
+                let masks = document.querySelectorAll('.el-loading-mask');
+                let isMaskVis = Array.from(masks).some(m => m.style.display !== 'none' && getComputedStyle(m).display !== 'none');
+                let books = document.querySelectorAll('.book-title, .el-card');
                 
-        if find_element(CLOSE_BUTTON_IMG, timeout=1): find_and_click(CLOSE_BUTTON_IMG, timeout=2)
-        find_and_click(CLEAR_SEARCH_BUTTON_IMG, timeout=5)
+                if (searchInput && !searchInput.disabled && !isMaskVis && books.length > 0) {
+                    isReady = true;
+                    break;
+                }
+                await new Promise(r => setTimeout(r, 500));
+                retries++;
+            }
+            if (!isReady) return 'Timeout waiting for EMM to load books or clear loading mask';
+            
+            // Brief extra buffer after loading mask clears - increased to 2500ms as per request 
+            await new Promise(r => setTimeout(r, 2500));
+            
+            searchInput.focus();
+            searchInput.value = '';
+            searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+            searchInput.select();
+            return 'OK';
+        })();
+        """
+        focus_res = client.evaluate(js_focus)
+        if focus_res != 'OK':
+            log_error(f"[EH CDP] 選擇搜尋框失敗，返回值: {focus_res}")
+            return
+            
+        log_info("[EH CDP] 執行原生 CDP 鍵盤輸入與觸發 (階段 2)...")
+        time.sleep(1.0)  # Brief micro-pause for Vue state - increased to 1.0s
+        
+        # --- Native CDP Typing (Bypasses Vue's event shadowing perfectly) ---
+        client.execute("Input.insertText", {"text": '"non-tag"$'})
+        time.sleep(1.5)  # Ensure text is populated - increased to 1.5s
+        
+        # Type the Enter key natively with full sequence
+        client.execute("Input.dispatchKeyEvent", {"type": "rawKeyDown", "windowsVirtualKeyCode": 13, "key": "Enter", "code": "Enter"})
+        client.execute("Input.dispatchKeyEvent", {"type": "char", "windowsVirtualKeyCode": 13, "key": "Enter", "code": "Enter", "text": "\r"})
+        client.execute("Input.dispatchKeyEvent", {"type": "keyUp", "windowsVirtualKeyCode": 13, "key": "Enter", "code": "Enter"})
+        
+        log_info("[EH CDP] 等待 Vue 響應搜尋操作並點擊 (階段 3)...")
+        
+        js_action = f"""
+        (async () => {{
+            // --- 工具函數：DOM 就緒輪詢 ---
+            const waitReady = async (maxMs = 10000) => {{
+                const t0 = Date.now();
+                while (Date.now() - t0 < maxMs) {{
+                    let masks = document.querySelectorAll('.el-loading-mask');
+                    let busy = Array.from(masks).some(m => m.style.display !== 'none' && getComputedStyle(m).display !== 'none');
+                    if (!busy) return true;
+                    await new Promise(r => setTimeout(r, 50));
+                }}
+                return false;
+            }};
 
-    except Exception as e: log_error(f"[EH 自動化] 自動化過程中發生錯誤: {e}", include_traceback=True); _update_progress(f"❌ 自動化錯誤: {e}")
+            // 1. 等待搜尋結果載入 (Enter 鍵已在階段 2 觸發搜尋)
+            await waitReady(15000);
+            await new Promise(r => setTimeout(r, 500));
+
+            let titles = document.querySelectorAll('.book-title');
+            if (titles.length === 0) return 'No non-tag comics found on screen';
+
+            // 4. 取得真實總數
+            let totalElem = document.querySelector('span.el-pagination__total.is-first') || document.querySelector('.el-pagination__total');
+            let totalMatch = totalElem ? totalElem.textContent.match(/\\d+/) : null;
+            let trueCount = totalMatch ? parseInt(totalMatch[0]) : {task_limit};
+            let count = Math.min({task_limit}, trueCount);
+            if (count === 0) return 'No non-tag comics to process';
+
+            // 5. 點進第一本詳情頁
+            titles[0].click();
+            await waitReady();
+            await new Promise(r => setTimeout(r, 300));
+
+            // 6. 逐本循環：重掃 + PageDown，全部用 DOM polling
+            for (let i = 0; i < count; i++) {{
+                // 找「重掃」按鈕
+                let rescanBtn = Array.from(document.querySelectorAll('button.el-button')).find(b => 
+                    (b.textContent && b.textContent.includes('重掃')) || 
+                    (b.innerText && b.innerText.includes('重掃')) || 
+                    (b.title && b.title.includes('重掃')) ||
+                    (b.getAttribute('aria-label') && b.getAttribute('aria-label').includes('重掃'))
+                );
+
+                if (rescanBtn) {{
+                    rescanBtn.click();
+                }} else {{
+                    return 'Error: Could not find Rescan button on comic ' + i;
+                }}
+
+                // 等待重掃完成（loading mask 消失）
+                await waitReady();
+
+                // 下一本
+                if (i < count - 1) {{
+                    document.dispatchEvent(new KeyboardEvent('keydown', {{ key: 'PageDown', code: 'PageDown', keyCode: 34, bubbles: true }}));
+                    await waitReady();
+                    await new Promise(r => setTimeout(r, 100)); // 微小緩衝確保 DOM 更新
+                }}
+            }}
+
+            // 7. Escape 回到列表
+            document.dispatchEvent(new KeyboardEvent('keydown', {{ key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }}));
+            await waitReady();
+            await new Promise(r => setTimeout(r, 500));
+
+            // 8. 點「批量獲取元數據」
+            let batchBtn = Array.from(document.querySelectorAll('button.el-button')).find(b => 
+                (b.textContent && b.textContent.includes('批量獲取元數據')) ||
+                (b.innerText && b.innerText.includes('批量獲取元數據')) ||
+                (b.title && b.title.includes('批量獲取元數據')) ||
+                (b.getAttribute('aria-label') && b.getAttribute('aria-label').includes('批量獲取元數據'))
+            );
+
+            if (batchBtn) {{
+                batchBtn.click();
+            }} else {{
+                return 'Error: Could not find Batch Fetch Metadata button';
+            }}
+
+            return true;
+        }})();
+        """
+        
+        result = client.evaluate(js_action)
+        
+        if result is True or result == True or result == "true":
+            _update_progress("✅ 自動化更新完成", 100)
+            log_info("[EH CDP] JS 自動化流程執行成功。")
+        else:
+            log_error(f"[EH CDP] JS 執行未成功，返回值: {result}")
+            _update_progress(f"❌ 自動化中斷: {result}", 100)
+    except Exception as e:
+        import traceback
+        log_error(f"[EH CDP] 自動化執行失敗: {e}\n{traceback.format_exc()}")
+        _update_progress(f"❌ 自動化失敗: {e}", 100)
     finally:
-        if original_hkl: restore_keyboard_layout(original_hkl)
+        if 'client' in locals() and client: client.close()
+        log_info("[EH 自動化] 自動化完成，EMM 將保持開啟。")
 
 def create_database_backup(config: Dict):
     BACKUPS_TO_KEEP = 3; log_info("[EH 外掛] 正在檢查並執行資料庫備份...")
@@ -804,14 +874,9 @@ class EhDatabaseToolsPlugin(BasePlugin):
             if config.get('automation_enabled', False): required_paths.append('eh_manga_manager_path')
             if not all(config.get(p) and os.path.exists(config.get(p)) for p in required_paths):
                 log_error("[EH 外掛] 設定中的一個或多個必要路徑無效或不存在。"); _update_progress("❌ 錯誤: 外掛路徑設定不完整或無效。"); return
-            
-            # --- 強制繼續邏輯 ---
-            if config.get('automation_enabled', False):
-                close_manga_app_if_running(config)
-            # 強制給予回饋，表明流程已推進
+            if config.get('automation_enabled', False): close_manga_app_if_running(config)
             _update_progress("正在連接資料庫...", 10) 
-            # -------------------
-
+            
             if control_events and control_events['cancel'].is_set(): return
             data_dir = config.get('eh_data_directory')
             db_path = os.path.join(data_dir, "database.sqlite")
@@ -852,3 +917,32 @@ class EhDatabaseToolsPlugin(BasePlugin):
         try: export_tag_failed_to_csv(config)
         except Exception as e: log_error(f"[EH 外掛] 執行 tag-failed 匯出時發生例外: {e}")
         if summary: summary.report()
+        # --- v-MOD: 回傳執行摘要物件，讓其他外掛可以讀取數據 ---
+        return summary 
+        # --- v-MOD END ---
+        
+    def sync_deleted_files(self, config: Dict[str, Any], deleted_paths: List[str]):
+        # v-MOD: 只要配置了 eh_data_directory 就能同步，不再需要 enable_eh_preprocessor
+        if not deleted_paths: return
+        db_dir = config.get('eh_data_directory')
+        if not db_dir: return
+        db_file = os.path.join(db_dir, "database.sqlite")
+        if not os.path.exists(db_file): return
+        
+        log_info(f"[EH 外掛] 接收主程式刪除訊號。準備同步軟刪除 {len(deleted_paths)} 筆檔案記錄...")
+        create_database_backup(config)
+        update_database_records(db_file, paths_to_soft_delete=deleted_paths)
+        log_info("[EH 外掛] 同步軟刪除完成。")
+
+    def sync_restored_files(self, config: Dict[str, Any], restored_paths: List[str]):
+        # v-MOD: 只要配置了 eh_data_directory 就能同步
+        if not restored_paths: return
+        db_dir = config.get('eh_data_directory')
+        if not db_dir: return
+        db_file = os.path.join(db_dir, "database.sqlite")
+        if not os.path.exists(db_file): return
+        
+        log_info(f"[EH 外掛] 接收主程式復原訊號。準備同步還原 {len(restored_paths)} 筆檔案記錄...")
+        create_database_backup(config)
+        update_database_records(db_file, paths_to_restore=restored_paths)
+        log_info("[EH 外掛] 同步還原完成。")
