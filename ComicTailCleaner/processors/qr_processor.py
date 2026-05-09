@@ -34,15 +34,12 @@ class QrProcessor(BaseProcessor):
         progress_queue: Optional[Queue] = None,
         control_events: Optional[dict] = None,
     ):
+        super().__init__(config, progress_queue, control_events)
         # 複製設定，避免修改原始字典
         self.config = dict(config) if config else {}
         
         # 強制設定為 QR 模式，確保 core_engine 走正確的邏輯分支
         self.config["comparison_mode"] = "qr_detection"
-        
-        # 保存進度佇列和控制事件，以便傳遞給核心引擎
-        self.progress_queue = progress_queue
-        self.control_events = control_events
 
     def run(self) -> Optional[Tuple[List[tuple], Dict[str, Any], List[tuple]]]:
         """
@@ -57,7 +54,9 @@ class QrProcessor(BaseProcessor):
                 self.control_events,
             )
             # 呼叫核心引擎的統一入口函式，它會根據模式自動分派任務
-            return engine.find_duplicates()
+            result = engine.find_duplicates()
+            self.cache_stats = getattr(engine, 'cache_stats', {})
+            return result
         except Exception as e:
             log_error(f"[QR Processor] 執行過程中發生未預期的錯誤: {e}")
             # 向上拋出異常，讓呼叫者 (例如 GUI) 能夠捕獲並處理

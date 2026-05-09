@@ -15,6 +15,7 @@ class ComparisonProcessor(BaseProcessor):
 
             engine = ImageComparisonEngine(self.config, self.progress_queue, self.control_events)
             result = engine.find_duplicates()
+            self.cache_stats = getattr(engine, 'cache_stats', {})
 
             # **契約**：核心在取消/暫停時會回傳 None
             if result is None:

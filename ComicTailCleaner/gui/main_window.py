@@ -4,6 +4,8 @@
 # ======================================================================
 import os
 import sys
+import json
+import hashlib
 import datetime
 import threading
 import time
@@ -26,9 +28,9 @@ try:
 except ImportError:
     send2trash = None
     
-from config import CONFIG_FILE, default_config, APP_NAME_TC, APP_VERSION
+from config import CONFIG_FILE, default_config, APP_NAME_TC, APP_VERSION, CACHE_DIR, CONFIG_DIR, DATA_DIR
 import utils
-from utils import (log_info, log_error, log_performance, save_config, load_config, 
+from utils import (log_info, log_error, log_warning, log_performance, save_config, load_config, 
                    _is_virtual_path, _parse_virtual_path, _open_folder, _reveal_in_explorer, _get_file_stat, 
                    _open_image_from_any_path, 
                    ARCHIVE_SUPPORT_ENABLED, QR_SCAN_ENABLED, VPATH_SEPARATOR)
@@ -61,6 +63,7 @@ from .tooltip import Tooltip
 
 class MainWindow(tk.Tk):
     def __init__(self, *args, **kwargs):
+        self._startup_t0 = time.perf_counter()
         super().__init__(*args, **kwargs)
         if Image is None or ImageTk is None: messagebox.showerror("缺少核心依賴", "Pillow 函式庫未安裝或無法載入，程式無法運行。"); self.destroy(); return
         
@@ -87,6 +90,9 @@ class MainWindow(tk.Tk):
         self._last_target_src_size: Optional[Tuple[int, int]] = None
         self._last_compare_src_size: Optional[Tuple[int, int]] = None
         self._qr_style = dict(color=(0, 255, 0), alpha=90, outline_thickness=None)
+        self._initial_ui_started = False
+        self._heavy_widgets_finished = False
+        self.preprocessor_results = [] # 新增：存放前置處理器的結果摘要
         
         self._setup_main_window()
 
@@ -106,7 +112,8 @@ class MainWindow(tk.Tk):
             plugin_path = os.path.join(plugins_dir, plugin_name)
             if os.path.isdir(plugin_path) and os.path.isfile(os.path.join(plugin_path, "processor.py")):
                 try:
-                    spec = importlib.util.spec_from_file_location(f"plugins.{plugin_name}.processor", os.path.join(plugin_path, "processor.py"))
+                    processor_path = os.path.join(plugin_path, "processor.py")
+                    spec = importlib.util.spec_from_file_location(f"plugins.{plugin_name}.processor", processor_path)
                     module = importlib.util.module_from_spec(spec)
                     spec.loader.exec_module(module)
                     for attr in dir(module):
@@ -115,29 +122,41 @@ class MainWindow(tk.Tk):
                             instance = cls()
                             self.plugin_manager[instance.get_id()] = instance
                 except Exception as e:
+                    log_error(f"[Plugin load] Failed to load plugin '{plugin_name}' from {processor_path}: {e}", include_traceback=True)
                     print(f"加載外掛 '{plugin_name}' 失敗: {e}")
 
     def deiconify(self):
         super().deiconify()
-        if not self._widgets_initialized: 
+        if not self._widgets_initialized and not self._initial_ui_started:
+            self._initial_ui_started = True
             self._init_widgets()
-            self._check_queues()
-            
-            # 延遲觸發外掛載入
-            self.after(50, self._start_async_plugin_load)
+            self.update_idletasks()
+            log_info(f"[啟動] Real UI shell painted in {time.perf_counter() - self._startup_t0:.2f}s")
+            self.after_idle(self._finish_initial_ui)
+
+    def _finish_initial_ui(self):
+        if not self._heavy_widgets_finished:
+            t0 = time.perf_counter()
+            self._create_checkbox_icons()
+            self._setup_tree_tooltip()
+            self._create_context_menu()
+            self._heavy_widgets_finished = True
+            log_info(f"[啟動] Deferred UI helpers initialized in {time.perf_counter() - t0:.2f}s")
+
+        self._check_queues()
+        log_info(f"[啟動] GUI widgets initialized in {time.perf_counter() - self._startup_t0:.2f}s")
+
+        # 延遲觸發外掛載入
+        self.after(50, self._start_async_plugin_load)
             
     def _start_async_plugin_load(self):
         self.status_label.config(text="⏱️ 正在背景載入外掛模組...")
         threading.Thread(target=self._async_plugin_load_worker, daemon=True).start()
 
     def _async_plugin_load_worker(self):
+        t0 = time.perf_counter()
         self._load_plugins()
-        
-        try:
-            # 在背景預先載入設定視窗模組，避免使用者首次點擊設定時因過度載入重型套件而卡頓
-            import gui.settings_window
-        except Exception:
-            pass
+        plugin_elapsed = time.perf_counter() - t0
             
         combined_default_config = default_config.copy()
         for plugin_id, plugin in self.plugin_manager.items():
@@ -150,10 +169,11 @@ class MainWindow(tk.Tk):
                 except Exception as e:
                     print(f"[WARN] 讀取外掛 {plugin_id} 預設值失敗: {e}")
                     
-        self.after(0, self._on_plugins_loaded, combined_default_config)
+        self.after(0, self._on_plugins_loaded, combined_default_config, plugin_elapsed)
 
-    def _on_plugins_loaded(self, combined_default_config):
+    def _on_plugins_loaded(self, combined_default_config, plugin_elapsed: float = 0.0):
         self.config = load_config(CONFIG_FILE, combined_default_config)
+        log_info(f"[啟動] Plugin load completed in {plugin_elapsed:.2f}s ({len(self.plugin_manager)} plugins)")
         
         # 套用外掛樹狀標籤樣式
         for plugin in self.plugin_manager.values():
@@ -170,6 +190,20 @@ class MainWindow(tk.Tk):
         self.settings_button.config(state=tk.NORMAL)
         self.start_button.config(state=tk.NORMAL)
         self.status_label.config(text="準備就緒")
+        log_info(f"[啟動] GUI ready in {time.perf_counter() - self._startup_t0:.2f}s")
+        self.after(500, self._start_async_settings_preload)
+
+    def _start_async_settings_preload(self):
+        threading.Thread(target=self._async_settings_preload_worker, daemon=True).start()
+
+    def _async_settings_preload_worker(self):
+        t0 = time.perf_counter()
+        try:
+            # 準備就緒後再預載，避免拖慢主視窗可操作時間。
+            import gui.settings_window
+            log_info(f"[啟動] Settings window preloaded in {time.perf_counter() - t0:.2f}s")
+        except Exception as e:
+            log_warning(f"[啟動] Settings window preload failed: {e}")
         
     def _setup_main_window(self):
         self.title(f"{APP_NAME_TC} v{APP_VERSION}")
@@ -187,7 +221,7 @@ class MainWindow(tk.Tk):
         data_dir = self.config.get('data_dir', getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__))))
         self.undo_manager = UndoManager(data_dir)
         
-        self.bold_font = self._create_bold_font(); self._create_checkbox_icons(); self._create_widgets(); self._bind_keys(); self._widgets_initialized = True
+        self.bold_font = self._create_bold_font(); self._create_widgets(); self._bind_keys(); self._widgets_initialized = True
         
     def _create_checkbox_icons(self):
         from PIL import Image, ImageDraw, ImageTk
@@ -244,9 +278,11 @@ class MainWindow(tk.Tk):
         left_frame=ttk.Frame(main_pane); main_pane.add(left_frame,weight=3); self._create_treeview(left_frame)
         right_frame=ttk.Frame(main_pane); main_pane.add(right_frame,weight=2); self._create_preview_panels(right_frame)
         bottom_button_container=ttk.Frame(self); bottom_button_container.pack(fill=tk.X,expand=False,padx=10,pady=(0,5)); self._create_bottom_buttons(bottom_button_container)
+        
         status_frame=ttk.Frame(self,relief=tk.SUNKEN,padding=2); status_frame.pack(side=tk.BOTTOM,fill=tk.X)
-        self.status_label=ttk.Label(status_frame,text="準備就緒"); self.status_label.pack(side=tk.LEFT,padx=5, fill=tk.X, expand=True)
-        self.progress_bar=ttk.Progressbar(status_frame,orient='horizontal',mode='determinate'); self.progress_bar.pack(side=tk.RIGHT,fill=tk.X,expand=True,padx=5)
+        status_frame.columnconfigure(0, weight=1)
+        self.status_label=ttk.Label(status_frame,text="準備就緒", width=1, anchor="w"); self.status_label.grid(row=0, column=0, sticky="ew", padx=5)
+        self.progress_bar=ttk.Progressbar(status_frame,orient='horizontal',mode='determinate', length=250); self.progress_bar.grid(row=0, column=1, sticky="e", padx=5)
         
     def _create_treeview(self, parent_frame: ttk.Frame):
         columns=("filename","path","count","size","ctime","similarity"); self.tree=ttk.Treeview(parent_frame,columns=columns,show="tree headings",selectmode="extended")
@@ -276,6 +312,7 @@ class MainWindow(tk.Tk):
         self.tree.tag_configure('ad_like_group', background='#E6F4FF', foreground='#0B5394')
         self.tree.tag_configure('protected_item', background='#FFFACD')
         self.tree.tag_configure('uncensored_item', background='#C8E6C9', foreground='#2E7D32')
+        self.tree.tag_configure('empty_folder_group', background='#F5F5F5', foreground='#666666') # 新增：空資料夾樣式
 
         # 這裡原本有的外掛樣式套用已移動到 _on_plugins_loaded()
         
@@ -289,7 +326,7 @@ class MainWindow(tk.Tk):
         parent_frame.grid_rowconfigure(0, weight=1)
         parent_frame.grid_columnconfigure(0, weight=1)
         
-        self._setup_tree_tooltip()
+        # Tooltip setup is deferred until the first real UI paint is complete.
 
     def _setup_tree_tooltip(self):
         class TreeviewTooltip:
@@ -381,7 +418,7 @@ class MainWindow(tk.Tk):
         self.compare_path_label=ttk.Label(compare_path_container,text="",wraplength=500, anchor="w", justify=tk.LEFT); self.compare_path_label.pack(fill=tk.BOTH, expand=True)
         self.compare_image_label.bind("<Button-1>",lambda e:self._on_preview_image_click(False))
         self.target_image_label.bind("<Configure>", self._on_preview_resize); self.compare_image_label.bind("<Configure>", self._on_preview_resize)
-        self._create_context_menu()
+        # Context menu setup is deferred until the first real UI paint is complete.
         
     def _create_bottom_buttons(self, parent_frame: ttk.Frame):
         button_frame = ttk.Frame(parent_frame); button_frame.pack(side=tk.LEFT, padx=5, pady=5)
@@ -424,8 +461,16 @@ class MainWindow(tk.Tk):
             messagebox.showwarning("QR 模式不可用", "此環境缺少 OpenCV / numpy，無法進行 QR 檢測。"); return
         
         if not self.is_paused: 
+            utils.append_runtime_log_session_header()
             self._reset_scan_state()
             self.tree.delete(*self.tree.get_children())
+            # [SDK dc: 預飛檢查] 若使用 SDK + 建立日期模式，先確認索引
+            if (self.config.get('enable_everything_mft_scan') and
+                    self.config.get('folder_time_mode') == 'ctime' and
+                    self.config.get('everything_dc_choice') != 'always_dm'):
+                self._preflight_everything_dc_check()
+            elif self.config.get('everything_dc_choice') == 'always_dm':
+                self.config['_everything_force_dm'] = True
             
         self.processor_instance = self._get_processor_instance(mode)
         if not self.processor_instance:
@@ -434,6 +479,9 @@ class MainWindow(tk.Tk):
         self.start_button.config(state=tk.DISABLED); self.settings_button.config(state=tk.DISABLED)
         self.pause_button.config(text="暫停", state=tk.NORMAL); self.cancel_button.config(state=tk.NORMAL)
         
+        if not self.is_paused:
+            self.scan_start_time = time.perf_counter()
+            
         self.is_paused = False
         
         # 將前置處理移入背景執行緒
@@ -441,35 +489,178 @@ class MainWindow(tk.Tk):
         self.scan_thread.start()
 
     def _run_scan_pipeline_in_thread(self):
-        preprocessor_plugins = {pid: p for pid, p in self.plugin_manager.items() if p.get_plugin_type() == 'preprocessor'}
-        
-        # 1. 把前置處理外掛全部同時開跑（平行）
-        pre_threads = []
-        for plugin_id, plugin in preprocessor_plugins.items():
+        try:
+            self._run_preprocessors_before_scan()
+            if self.cancel_event.is_set():
+                self.scan_queue.put({'type': 'finish', 'text': "任務已取消"})
+                return
+            self._run_scan_in_thread()
+        except Exception as e:
+            log_error(f"掃描流程執行失敗: {e}", include_traceback=True)
+            self.scan_queue.put({'type': 'finish', 'text': f"執行錯誤: {e}"})
+
+    def _get_enabled_preprocessor_plugins(self):
+        enabled_plugins = []
+        for plugin_id, plugin in self.plugin_manager.items():
+            if plugin.get_plugin_type() != 'preprocessor':
+                continue
             if not self.config.get(f'enable_{plugin_id}', False):
                 continue
-            self.scan_queue.put({'type': 'text', 'text': f"⚙️ 並行啟動前置處理: {plugin.get_name()}..."})
-            control_events = {'cancel': self.cancel_event, 'pause': self.pause_event}
-            t = threading.Thread(
-                target=plugin.run,
-                args=(self.config.copy(), self.scan_queue, control_events),
-                kwargs={'app_update_callback': lambda: None},
-                daemon=True,
-                name=f"preprocessor_{plugin_id}"
+            enabled_plugins.append((plugin_id, plugin))
+        return enabled_plugins
+
+    def _get_eh_hint_cache_signature(self, root: str):
+        try:
+            entries = []
+            with os.scandir(root) as it:
+                for entry in it:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    stat = entry.stat(follow_symlinks=False)
+                    entries.append((entry.name, stat.st_mtime_ns))
+            entries.sort(key=lambda x: x[0].casefold())
+            digest = hashlib.sha1()
+            for name, mtime_ns in entries:
+                digest.update(name.casefold().encode("utf-8", errors="surrogatepass"))
+                digest.update(b"\0")
+                digest.update(str(mtime_ns).encode("ascii"))
+                digest.update(b"\0")
+            return {
+                "count": len(entries),
+                "digest": digest.hexdigest(),
+            }
+        except Exception as e:
+            log_warning(f"[EH hint cache] Failed to build direct-child signature; bypass cache. {e}")
+            return None
+
+    def _get_eh_hint_cache_path(self) -> str:
+        return os.path.join(CACHE_DIR, "eh_folder_hints_cache.json")
+
+    def _load_eh_folder_hints_cache(self, root: str, signature):
+        if not signature:
+            return None
+        cache_path = self._get_eh_hint_cache_path()
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if payload.get("root") != os.path.normcase(os.path.normpath(root)):
+                return None
+            if payload.get("signature") != signature:
+                return None
+            hints = payload.get("non_empty_folders")
+            if not isinstance(hints, list):
+                return None
+            log_info(f"[EH hint cache] Hit: reused {len(hints)} non-empty direct folders.")
+            return {os.path.normpath(p) for p in hints}
+        except FileNotFoundError:
+            return None
+        except Exception as e:
+            log_warning(f"[EH hint cache] Failed to read cache; rebuilding. {e}")
+            return None
+
+    def _save_eh_folder_hints_cache(self, root: str, signature, non_empty: set):
+        if not signature:
+            return
+        cache_path = self._get_eh_hint_cache_path()
+        try:
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            payload = {
+                "root": os.path.normcase(os.path.normpath(root)),
+                "signature": signature,
+                "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
+                "non_empty_folders": sorted(os.path.normpath(p) for p in non_empty),
+            }
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log_warning(f"[EH hint cache] Failed to save cache. {e}")
+
+    def _build_eh_folder_hints(self) -> set:
+        """用 Everything SDK 查出 root_scan_folder 下所有「有檔案的直接子資料夾」。
+        若 SDK 不可用或查詢失敗，回傳 None（外掛將 fallback 到 os.scandir）。
+        """
+        root = self.config.get('root_scan_folder', '')
+        if not root or not self.config.get('enable_everything_mft_scan', False):
+            return None
+        signature = self._get_eh_hint_cache_signature(root)
+        cached_hints = self._load_eh_folder_hints_cache(root, signature)
+        if cached_hints is not None:
+            return cached_hints
+        try:
+            from processors.everything_ipc import EverythingIPCManager
+            ev = EverythingIPCManager()
+            if not ev.is_everything_running():
+                log_info("[EH 外掛] Everything 服務未運行，將 fallback 到 os.scandir。")
+                return None
+            # 查詢根目錄下的所有媒體/壓縮檔（不帶時間限制，只要知道哪個資料夾有內容即可）
+            media_exts = [
+                '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp',
+                '.zip', '.cbz', '.rar', '.cbr', '.7z', '.cb7',
+            ]
+            all_files = ev.search(
+                root_path=root,
+                extensions=media_exts,
+                excluded_paths=[],
+                excluded_names=[],
             )
-            t.start()
-            pre_threads.append((plugin.get_name(), t))
-        
-        # 2. 同時執行核心引擎掃描（不等前置外掛）
-        self._run_scan_in_thread()
-        
-        # 3. 掃描已完成，確認前置外掛也都跑完（通常早就結束了）
-        for name, t in pre_threads:
-            if t.is_alive():
-                self.scan_queue.put({'type': 'text', 'text': f"⏳ 等待 {name} 完成同步..."})
-                t.join(timeout=300)
-                if t.is_alive():
-                    log_error(f"前置外掛 '{name}' 超過 300 秒仍未完成，已放棄等待。")
+            if not all_files and all_files is not None:
+                # 查詢成功但 0 筆結果，有可能根目錄本身沒有媒體檔（EH 資料夾全空）
+                log_info("[EH 外掛] SDK hint：查詢結果為 0，視為全部空資料夾情境。")
+                return set()  # 回傳空 set（非 None），外掛會正確走 SDK 快速路徑
+            non_empty = set()
+            root_norm = os.path.normcase(os.path.normpath(root))
+            for file_path in all_files:
+                parent = os.path.dirname(file_path)
+                parent_norm = os.path.normcase(os.path.normpath(parent))
+                # 只計直接子資料夾（depth == 1）
+                if os.path.normcase(os.path.dirname(parent_norm)) == root_norm:
+                    non_empty.add(os.path.normpath(parent))
+            log_info(f"[EH 外掛] SDK hint 建立完成：{len(non_empty)} 個有內容的直接子資料夾。")
+            self._save_eh_folder_hints_cache(root, signature, non_empty)
+            return non_empty
+        except Exception as e:
+            log_warning(f"[EH 外掛] 建立 SDK folder hints 失敗（將 fallback 到 os.scandir）: {e}")
+            return None
+
+
+    def _run_preprocessors_before_scan(self):
+        preprocessor_plugins = self._get_enabled_preprocessor_plugins()
+        if not preprocessor_plugins:
+            return
+
+        # 嘗試用 Everything SDK 預先建立「有內容的資料夾」集合，供 EH 外掛加速用
+        folder_hints = self._build_eh_folder_hints()
+
+        control_events = {'cancel': self.cancel_event, 'pause': self.pause_event}
+        total = len(preprocessor_plugins)
+        for idx, (plugin_id, plugin) in enumerate(preprocessor_plugins, start=1):
+            if self.cancel_event.is_set():
+                return
+            plugin_name = plugin.get_name()
+            self.scan_queue.put({
+                'type': 'text',
+                'text': f"[前置處理 {idx}/{total}] 開始執行: {plugin_name}..."
+            })
+            try:
+                plugin_config = self.config.copy()
+                # 若 SDK hint 可用，注入給外掛；不可用時不設定此 key，外掛自行 fallback
+                if folder_hints is not None:
+                    plugin_config['eh_non_empty_folder_hints'] = folder_hints
+                res = plugin.run(
+                    plugin_config,
+                    self.scan_queue,
+                    control_events,
+                    app_update_callback=lambda: None
+                )
+                if res:
+                    self.preprocessor_results.append(res)
+            except Exception as e:
+                log_error(f"前置外掛 '{plugin_id}' 執行失敗: {e}", include_traceback=True)
+                self.scan_queue.put({
+                    'type': 'text',
+                    'text': f"[前置處理] {plugin_name} 執行失敗: {e}"
+                })
+                raise
 
 
     def _get_processor_instance(self, mode: str) -> Optional[Union[BaseProcessor, BasePlugin]]:
@@ -504,6 +695,18 @@ class MainWindow(tk.Tk):
                 return
 
             found, data, errors = result
+            
+            # --- v-MOD: 合併前置處理器的偵測結果 (例如空資料夾) ---
+            for summary in self.preprocessor_results:
+                if hasattr(summary, 'detected_empty_list') and summary.detected_empty_list:
+                    for path in summary.detected_empty_list:
+                        # 格式: (group_key, item_path, value_str, tag)
+                        found.append(("EMPTY_FOLDERS_ROOT", path, "空資料夾 (EH偵測)", "empty_folder_group"))
+                    
+                    if "EMPTY_FOLDERS_ROOT" not in data:
+                        data["EMPTY_FOLDERS_ROOT"] = {"display_name": "📁 空資料夾 (建議清理)"}
+            # --- END v-MOD ---
+
             self.scan_queue.put({'type': 'result', 'data': found, 'meta': data, 'errors': errors})
             base_text = f"✅ 掃描完成！找到 {len(found)} 個目標。"
             if errors:
@@ -511,12 +714,16 @@ class MainWindow(tk.Tk):
                 log_error(f"⚠️ 以下 {len(errors)} 個項目處理失敗：")
                 for err_path, err_msg in (errors.items() if isinstance(errors, dict) else [(str(e), '') for e in errors]):
                     log_error(f"  ❌ {err_path}  →  {err_msg}")
-            self.scan_queue.put({'type': 'finish', 'text': base_text})
+            cache_stats = getattr(self.processor_instance, 'cache_stats', None)
+            eh_summary_data = self._extract_eh_summary_data()
+            self.scan_queue.put({'type': 'finish', 'text': base_text, 'cache_stats': cache_stats, 'error_count': len(errors or {}), 'eh_summary': eh_summary_data})
         except Exception as e:
             log_error(f"核心邏輯執行失敗: {e}", True)
             self.scan_queue.put({'type': 'finish', 'text': f"執行錯誤: {e}"})
 
     def _reset_scan_state(self):
+        self.config.pop('_everything_force_dm', None)  # 清理暫態旗標
+        self.preprocessor_results = [] # 重設前置處理結果
         self.final_status_text = ""; self.cancel_event.clear(); self.pause_event.clear(); self.is_paused = False; self.processor_instance = None; self.protected_paths.clear(); self.child_to_parent.clear(); self.parent_to_children.clear(); self.item_to_path.clear(); self.banned_groups.clear()
 
     def cancel_scan(self):
@@ -534,6 +741,55 @@ class MainWindow(tk.Tk):
     def _reset_control_buttons(self, final_status_text: str = "任務完成"):
         self.status_label.config(text=final_status_text); self.progress_bar['value'] = 0; self.start_button.config(state=tk.NORMAL); self.settings_button.config(state=tk.NORMAL); self.pause_button.config(state=tk.DISABLED, text="暫停"); self.cancel_button.config(state=tk.DISABLED)
 
+    def _build_qr_finish_summary(self) -> str:
+        if self.config.get('comparison_mode') != 'qr_detection' or not self.all_found_items:
+            return ""
+        groups = defaultdict(list)
+        for gk, ip, vs, *rest in self.all_found_items:
+            tag = rest[0] if rest else ""
+            groups[gk].append((ip, vs, tag))
+        total_groups = len(groups)
+        ad_like_groups = sum(
+            1 for items in groups.values()
+            if any(str(tag) == 'ad_like_group' for _, _, tag in items)
+        )
+        new_qr_groups = max(0, total_groups - ad_like_groups)
+        return f" [QR 摘要：總 QR {total_groups} 張，似廣告 {ad_like_groups} 張，新 QR {new_qr_groups} 張]"
+
+    def _build_eh_status_bar_summary(self, eh_summary: dict) -> str:
+        """
+        [EH-FEAT-05] 產生非阻塞狀態列摘要短文字。
+        若數值皆為 0 則不顯示，避免噪音。
+        """
+        if not eh_summary:
+            return ""
+        
+        # 提取數值
+        added = eh_summary.get('added', 0)
+        deleted = eh_summary.get('deleted', 0)
+        restored = eh_summary.get('restored', 0)
+        empty = eh_summary.get('empty', 0)
+        
+        # 判定是否全為 0
+        if not any([added, deleted, restored, empty]):
+            return ""
+            
+        return f" [EH: +{added}/-{deleted}/R{restored}/E{empty}]"
+
+    def _extract_eh_summary_data(self) -> Optional[dict]:
+        """
+        從 preprocessor_results 中提取 EH 執行摘要數據。
+        """
+        for res in self.preprocessor_results:
+            if hasattr(res, 'added'):
+                return {
+                    'added': getattr(res, 'added', 0),
+                    'deleted': getattr(res, 'soft_deleted', 0),
+                    'restored': getattr(res, 'restored', 0),
+                    'empty': len(getattr(res, 'detected_empty_list', []))
+                }
+        return None
+
     def _check_queues(self):
         if self.is_closing or not self.winfo_exists(): return
         try:
@@ -547,19 +803,72 @@ class MainWindow(tk.Tk):
                     self.all_found_items, self.all_file_data, failed_tasks = msg.get('data', []), msg.get('meta', {}), msg.get('errors', [])
                     self._process_scan_results(failed_tasks)
                 elif msg_type == 'finish':
-                    self.final_status_text = msg.get('text', '任務完成'); self._reset_control_buttons(self.final_status_text)
-                    if not self.all_found_items and "取消" not in self.final_status_text and "暫停" not in self.final_status_text: messagebox.showinfo("掃描結果", "未找到符合條件的相似或廣告圖片。")
+                    total_dur = ""
+                    if getattr(self, 'scan_start_time', None):
+                        dur = time.perf_counter() - self.scan_start_time
+                        total_dur = f" (總耗時 {dur:.2f} 秒)"
+                    qr_summary = self._build_qr_finish_summary()
+                    eh_summary = self._build_eh_status_bar_summary(msg.get('eh_summary'))
+                    
+                    cache_summary = ""
+                    cache_stats = msg.get('cache_stats')
+                    if cache_stats:
+                        cache_summary = f" [快取: 命中 {cache_stats.get('hit', 0)} 筆, 重算 {cache_stats.get('recalc', 0)} 筆, 淘汰 {cache_stats.get('purge', 0)} 筆, 重掃 {cache_stats.get('rescan_folders', 0)} 目錄]"
+                    
+                    if getattr(self, 'scan_start_time', None):
+                        log_info(f"任務總結: {msg.get('text', '任務完成')}{qr_summary}{eh_summary}{cache_summary}{total_dur}")
+                    
+                    self.final_status_text = f"{msg.get('text', '任務完成')}{qr_summary}{eh_summary}{cache_summary}{total_dur}"
+                    self._reset_control_buttons(self.final_status_text)
         except Empty: pass
         try:
             while True:
                 msg = self.preview_queue.get_nowait()
-                if msg['type'] == 'image_loaded':
+                msg_type = msg.get('type')
+                if msg_type == 'image_loaded':
                     if msg['is_target']: self.pil_img_target = msg['image']; self._last_target_path = msg.get('path'); self._last_target_src_size = msg.get('src_size')
                     else: self.pil_img_compare = msg['image']; self._last_compare_path = msg.get('path'); self._last_compare_src_size = msg.get('src_size')
                     self._update_all_previews()
+                elif msg_type == 'diff_loaded':
+                    # 防止舊的進程結果蓋掉新圖
+                    if msg.get('compare_path') == self._last_requested_compare_path:
+                        self._resize_and_display(self.compare_image_label, msg['image'], False)
         except Empty: pass
         finally:
             if not self.is_closing: self.after(100, self._check_queues)
+
+    def _build_structured_recap(self, mode, status_text, duration_sec, cache_stats=None, results=None, error_count=None):
+        """
+        [L3-LOG-D] 根據任務狀態產生結構化的摘要區塊 (格式產生器)。
+        """
+        status = "completed"
+        if "取消" in status_text: status = "cancelled"
+        elif "錯誤" in status_text: status = "error"
+        elif "暫停" in status_text: status = "paused"
+        
+        lines = ["# RECAP BEGIN", f"mode: {mode}", f"status: {status}", f"duration_sec: {duration_sec:.2f}"]
+        if results is not None: lines.append(f"results: groups={results[0]}, items={results[1]}")
+        if cache_stats:
+            cs = cache_stats
+            lines.append(f"cache: hit={cs.get('hit', 0)}, recalc={cs.get('recalc', 0)}, purge={cs.get('purge', 0)}, rescan_folders={cs.get('rescan_folders', 0)}")
+        lines.append("warnings: unknown")
+        if error_count is not None:
+            lines.append(f"errors: {error_count}")
+        elif status == "error":
+            lines.append("errors: unknown (see log for details)")
+        else:
+            lines.append("errors: unknown")
+        lines.append("# RECAP END")
+        return "\n".join(lines)
+
+    def _append_runtime_recap(self, text):
+        """
+        [L3-LOG-D] 將摘要區塊寫入 runtime log (寫入器)。
+        註：app.py 啟動時已安裝 tee，因此 print() 會同步寫入 LOG*.txt。
+        為了保持摘要區塊標記乾淨，不使用 log_info()。
+        """
+        # 先輸出一個換行確保與上方日誌分隔
+        print("\n" + text, flush=True)
 
     def _process_scan_results(self, failed_tasks: list):
         self.protected_paths.clear()
@@ -632,74 +941,54 @@ class MainWindow(tk.Tk):
             for gk, items in groups_to_load:
                 pid = f"group_{uid}"; uid += 1
                 is_ad_like = items and any("ad_like_group" == str(s[2]) for s in items)
+                # 判斷是否為「多副本分組」（組長 ≠ 子節點）
+                # QR 的似廣告結果仍需保留廣告基準圖作為子節點，與廣告比對體驗一致
+                has_children = items and any(path != gk for path, _, _ in items)
                 
-                if is_ad_like:
-                    is_prot = gk in self.protected_paths
-                    ptags = ['parent_item', 'ad_like_group']
-                    if is_prot: ptags.append('protected_item')
-                    
-                    self.tree.insert("", "end", iid=pid, open=True, values=(os.path.basename(gk), "", len(items), "", "", "廣告庫基準圖"), tags=tuple(ptags))
+                is_prot = gk in self.protected_paths
+                ptags = ['parent_item', 'qr_item']
+                if is_ad_like: ptags.append('ad_like_group')
+                if is_prot: ptags.append('protected_item')
+                if items and items[0][2]: ptags.append(items[0][2])
+                
+                gk_data = self.all_file_data.get(gk, {})
+                gk_size = f"{gk_data.get('size', 0):,}" if 'size' in gk_data and gk_data.get('size') is not None else "N/A"
+                gk_ctime = datetime.datetime.fromtimestamp(gk_data['ctime']).strftime('%Y/%m/%d %H:%M') if gk_data.get('ctime') else "N/A"
+                display_path, base_name = gk, os.path.basename(gk)
+                if _is_virtual_path(gk):
+                    archive_path, inner_path = _parse_virtual_path(gk)
+                    if archive_path: display_path = f"{os.path.basename(archive_path)}{VPATH_SEPARATOR}{inner_path}"; base_name = inner_path
+                
+                if has_children:
+                    img_icon = self.icon_locked if is_prot else self.icon_unchecked
+                    self.tree.insert("", "end", iid=pid, open=True, image=img_icon, values=(base_name, "", len(items), "", "", items[0][1]), tags=tuple(ptags))
                     self.item_to_path[pid] = gk
                     
-                    for path, val_str, tag in items:
+                    all_members = [(gk, items[0][1], items[0][2])] + [(p, v, t) for p, v, t in items if p != gk]
+                    for path, val_str, tag in all_members:
                         cid = f"item_{uid}"; uid += 1
-                        ctags = ['child_item', tag]
+                        ctags = ['child_item', 'qr_item']
+                        if tag: ctags.append(tag)
+                        if is_ad_like: ctags.append('ad_like_group')
                         if path in self.protected_paths: ctags.append('protected_item')
-                        
-                        f_data = self.all_file_data.get(path, {})
-                        f_size = f"{f_data.get('size', 0):,}" if f_data.get('size') else "N/A"
-                        f_ctime = datetime.datetime.fromtimestamp(f_data['ctime']).strftime('%Y/%m/%d %H:%M') if f_data.get('ctime') else "N/A"
-                        img_icon = self.icon_locked if path in self.protected_paths else (self.icon_checked if path in self.selected_files else self.icon_unchecked)
-                        
-                        self.tree.insert(pid, "end", iid=cid, image=img_icon, values=(os.path.basename(path), path, "", f_size, f_ctime, val_str), tags=tuple(ctags))
-                        self.item_to_path[cid] = path
+                        c_data = self.all_file_data.get(path, {})
+                        c_size = f"{c_data.get('size', 0):,}" if 'size' in c_data and c_data.get('size') is not None else "N/A"
+                        c_ctime = datetime.datetime.fromtimestamp(c_data['ctime']).strftime('%Y/%m/%d %H:%M') if c_data.get('ctime') else "N/A"
+                        is_sel = path in self.selected_files
+                        img_icon = self.icon_locked if path in self.protected_paths else (self.icon_checked if is_sel else self.icon_unchecked)
+                        c_display_path, c_base_name = path, os.path.basename(path)
+                        if _is_virtual_path(path):
+                            a_path, i_path = _parse_virtual_path(path)
+                            if a_path: c_display_path = f"{os.path.basename(a_path)}{VPATH_SEPARATOR}{i_path}"; c_base_name = i_path
+                        self.tree.insert(pid, "end", iid=cid, image=img_icon, values=(f"  └─ {c_base_name}", c_display_path, "", c_size, c_ctime, val_str), tags=tuple(ctags))
+                        self.child_to_parent[cid] = pid; self.parent_to_children[pid].append(cid); self.item_to_path[cid] = path
+                    self._update_group_checkbox(pid)
                 else:
-                    # 判斷是否為「多副本分組」（組長 ≠ 子節點）
-                    # 只有組長 == 第一個子節點路徑時，才是「純 QR 單張圖」
-                    has_children = items and any(path != gk for path, _, _ in items)
-                    
-                    is_prot = gk in self.protected_paths
-                    ptags = ['parent_item', 'qr_item']
-                    if is_prot: ptags.append('protected_item')
-                    if items and items[0][2]: ptags.append(items[0][2])
-                    
-                    gk_data = self.all_file_data.get(gk, {})
-                    gk_size = f"{gk_data.get('size', 0):,}" if 'size' in gk_data and gk_data.get('size') is not None else "N/A"
-                    gk_ctime = datetime.datetime.fromtimestamp(gk_data['ctime']).strftime('%Y/%m/%d %H:%M') if gk_data.get('ctime') else "N/A"
-                    display_path, base_name = gk, os.path.basename(gk)
-                    if _is_virtual_path(gk):
-                        archive_path, inner_path = _parse_virtual_path(gk)
-                        if archive_path: display_path = f"{os.path.basename(archive_path)}{VPATH_SEPARATOR}{inner_path}"; base_name = inner_path
-                    
-                    if has_children:
-                        img_icon = self.icon_locked if is_prot else self.icon_unchecked
-                        self.tree.insert("", "end", iid=pid, open=True, image=img_icon, values=(base_name, "", len(items), "", "", items[0][1]), tags=tuple(ptags))
-                        self.item_to_path[pid] = gk
-                        
-                        all_members = [(gk, items[0][1], items[0][2])] + [(p, v, t) for p, v, t in items if p != gk]
-                        for path, val_str, tag in all_members:
-                            cid = f"item_{uid}"; uid += 1
-                            ctags = ['child_item', 'qr_item']
-                            if tag: ctags.append(tag)
-                            if path in self.protected_paths: ctags.append('protected_item')
-                            c_data = self.all_file_data.get(path, {})
-                            c_size = f"{c_data.get('size', 0):,}" if 'size' in c_data and c_data.get('size') is not None else "N/A"
-                            c_ctime = datetime.datetime.fromtimestamp(c_data['ctime']).strftime('%Y/%m/%d %H:%M') if c_data.get('ctime') else "N/A"
-                            is_sel = path in self.selected_files
-                            img_icon = self.icon_locked if path in self.protected_paths else (self.icon_checked if is_sel else self.icon_unchecked)
-                            c_display_path, c_base_name = path, os.path.basename(path)
-                            if _is_virtual_path(path):
-                                a_path, i_path = _parse_virtual_path(path)
-                                if a_path: c_display_path = f"{os.path.basename(a_path)}{VPATH_SEPARATOR}{i_path}"; c_base_name = i_path
-                            self.tree.insert(pid, "end", iid=cid, image=img_icon, values=(f"  └─ {c_base_name}", c_display_path, "", c_size, c_ctime, val_str), tags=tuple(ctags))
-                            self.child_to_parent[cid] = pid; self.parent_to_children[pid].append(cid); self.item_to_path[cid] = path
-                        self._update_group_checkbox(pid)
-                    else:
-                        # 單張模式：維持原本扁平顯示（一個父節點，可直接選取）
-                        is_sel = gk in self.selected_files
-                        img_icon = self.icon_locked if is_prot else (self.icon_checked if is_sel else self.icon_unchecked)
-                        self.tree.insert("", "end", iid=pid, open=True, image=img_icon, values=(base_name, display_path, 1, gk_size, gk_ctime, items[0][1] if items else ""), tags=tuple(ptags))
-                        self.item_to_path[pid] = gk
+                    # 單張模式：維持原本扁平顯示（一個父節點，可直接選取）
+                    is_sel = gk in self.selected_files
+                    img_icon = self.icon_locked if is_prot else (self.icon_checked if is_sel else self.icon_unchecked)
+                    self.tree.insert("", "end", iid=pid, open=True, image=img_icon, values=(base_name, display_path, 1, gk_size, gk_ctime, items[0][1] if items else ""), tags=tuple(ptags))
+                    self.item_to_path[pid] = gk
         else:
             for gk, items in groups_to_load:
                 pid = f"group_{uid}"; uid += 1
@@ -849,6 +1138,7 @@ class MainWindow(tk.Tk):
             return path
         if not sel or not self.tree.exists(sel[0]):
             self.pil_img_target = self.pil_img_compare = None
+            self._last_requested_compare_path = None
             self._update_all_previews()
             self.target_path_label.config(text=""); self.compare_path_label.config(text="")
             return
@@ -863,11 +1153,24 @@ class MainWindow(tk.Tk):
             preview_path = get_display_path(item_id)
             parent_id = self.child_to_parent.get(item_id)
             if parent_id and self.tree.get_children(parent_id): compare_path = get_display_path(self.tree.get_children(parent_id)[0])
-        self.current_target_path = preview_path; self.current_compare_path = compare_path
-        if preview_path: self.executor.submit(self._load_image_worker, preview_path, True)
-        else: self.pil_img_target = None; self.target_path_label.config(text=""); self._update_all_previews()
-        if compare_path: self.executor.submit(self._load_image_worker, compare_path, False)
-        else: self.pil_img_compare = None; self.compare_path_label.config(text=""); self._update_all_previews()
+            
+        old_compare_path = getattr(self, '_last_requested_compare_path', None)
+        self.current_target_path = preview_path
+        self.current_compare_path = compare_path
+        self._last_requested_compare_path = compare_path
+        
+        if preview_path: 
+            self.executor.submit(self._load_image_worker, preview_path, True)
+        else: 
+            self.pil_img_target = None; self.target_path_label.config(text=""); self._update_all_previews()
+            
+        if compare_path: 
+            if compare_path != old_compare_path or self.pil_img_compare is None:
+                self.executor.submit(self._load_image_worker, compare_path, False)
+            else:
+                self._update_all_previews()
+        else: 
+            self.pil_img_compare = None; self.compare_path_label.config(text=""); self._update_all_previews()
 
     def _load_image_worker(self, path: str, is_target: bool):
         img = None
@@ -903,27 +1206,38 @@ class MainWindow(tk.Tk):
         
         # --- v-MOD: 處理差異遮罩 ---
         if getattr(self, 'show_diff_var', None) and self.show_diff_var.get() and self.pil_img_target and self.pil_img_compare and ImageChops:
-            try:
-                img1 = self.pil_img_target.convert("RGB")
-                img2 = self.pil_img_compare.convert("RGB")
-                if img1.size != img2.size:
-                    img2 = img2.resize(img1.size, Image.Resampling.LANCZOS)
-                
-                diff = ImageChops.difference(img1, img2)
-                red_layer = Image.new("RGBA", img2.size, (255, 0, 0, 180)) # 半透明紅底
-                mask = diff.convert("L").point(lambda p: min(255, p * 4))  # 放大差異
-                
-                base = self.pil_img_compare.convert("RGBA")
-                if base.size != img2.size:
-                    base = base.resize(img2.size, Image.Resampling.LANCZOS)
-                
-                img_with_diff = Image.composite(red_layer, base, mask)
-                self._resize_and_display(self.compare_image_label, img_with_diff, False)
-            except Exception as e:
-                log_error(f"產生差異遮罩失敗: {e}")
-                self._resize_and_display(self.compare_image_label, self.pil_img_compare, False)
+            # 先同步掛載未加料的比對圖
+            self._resize_and_display(self.compare_image_label, self.pil_img_compare, False)
+            # 背景執行差異運算，避免主執行緒卡死
+            self.executor.submit(
+                self._async_diff_worker, 
+                self.pil_img_target.copy(), 
+                self.pil_img_compare.copy(), 
+                self._last_requested_compare_path
+            )
         else:
             self._resize_and_display(self.compare_image_label, self.pil_img_compare, False)
+
+    def _async_diff_worker(self, target_img: Image.Image, compare_img: Image.Image, compare_path: str):
+        try:
+            img1 = target_img.convert("RGB")
+            img2 = compare_img.convert("RGB")
+            if img1.size != img2.size:
+                img2 = img2.resize(img1.size, Image.Resampling.LANCZOS)
+            
+            diff = ImageChops.difference(img1, img2)
+            red_layer = Image.new("RGBA", img2.size, (255, 0, 0, 180)) # 半透明紅底
+            mask = diff.convert("L").point(lambda p: min(255, p * 4))  # 放大差異
+            
+            base = compare_img.convert("RGBA")
+            if base.size != img2.size:
+                base = base.resize(img2.size, Image.Resampling.LANCZOS)
+            
+            img_with_diff = Image.composite(red_layer, base, mask)
+            self.preview_queue.put({'type': 'diff_loaded', 'image': img_with_diff, 'compare_path': compare_path})
+        except Exception as e:
+            log_error(f"非同步產生差異遮罩失敗: {e}")
+            self.preview_queue.put({'type': 'diff_loaded', 'image': compare_img, 'compare_path': compare_path})
         
     def _on_preview_resize(self, event: tk.Event):
         if not self.winfo_exists(): return
@@ -1297,6 +1611,8 @@ class MainWindow(tk.Tk):
     def _show_context_menu(self, event: tk.Event):
         item_id = self.tree.identify_row(event.y)
         if item_id:
+            if not hasattr(self, "context_menu"):
+                self._create_context_menu()
             if item_id not in self.tree.selection():
                 self.tree.selection_set(item_id)
                 self.tree.focus(item_id)
@@ -1370,3 +1686,96 @@ class MainWindow(tk.Tk):
             if hasattr(self, 'undo_manager'):
                 self._commit_deletions_impl(silent=True)
             self.destroy()
+
+    # ------------------------------------------------------------------ #
+    #  Everything dc: 索引 預飛檢查                                      #
+    # ------------------------------------------------------------------ #
+
+    def _preflight_everything_dc_check(self):
+        """在掃描執行前，偵測 Everything dc: 索引是否就緒。必須在主執行緒呼叫。"""
+        try:
+            from processors.everything_ipc import EverythingIPCManager
+            ev = EverythingIPCManager()
+            if ev.check_dc_indexed():
+                log_info("[SDK 預飛] dc: 索引已開啟，建立日期過濾可正常使用。")
+                return  # 已索引，不需任何處理
+
+            log_info("[SDK 預飛] 偵測到 dc: 索引未開啟，顯示詢問對話。")
+            choice = self._show_dc_index_dialog()
+
+            if choice == 'enable':
+                self.status_label.config(text="⏳ 正在修改 Everything 設定並重新啟動...")
+                self.update_idletasks()
+                success = ev.enable_dc_index_and_restart()
+                if success:
+                    messagebox.showinfo(
+                        "設定已套用",
+                        "✅ Everything 正在背景重建「建立日期」索引（約需數分鐘）。\n\n"
+                        "本次掃描將改用「修改日期」過濾。\n"
+                        "Everything 建檔完成後，下次掃描將能正確使用「建立日期」。",
+                        parent=self
+                    )
+                else:
+                    messagebox.showwarning(
+                        "設定失敗",
+                        "自動修改設定失敗。\n請手動到 Everything → 工具 → 選項 → 索引 → 勾選「索引建立日期」。",
+                        parent=self
+                    )
+                self.config['_everything_force_dm'] = True
+
+            elif choice == 'always_dm':
+                self.config['everything_dc_choice'] = 'always_dm'
+                self.config['_everything_force_dm'] = True
+                from utils import save_config
+                from config import CONFIG_FILE
+                save_config(self.config, CONFIG_FILE)
+                log_info("[SDK 預飛] 使用者選擇「一律改用修改日期」，已儲存設定。")
+
+            elif choice == 'this_time':
+                self.config['_everything_force_dm'] = True
+                log_info("[SDK 預飛] 本次改用修改日期過濾。")
+
+            # 否則 choice == 'ignore'：保持 dc: ，將會慢，但尊重使用者選擇
+        except Exception as e:
+            log_error(f"[SDK 預飛] 預飛檢查發生未預期錯誤: {e}")
+
+    def _show_dc_index_dialog(self) -> str:
+        """顯示 dc: 索引選擇對話。回傳 'enable' / 'this_time' / 'always_dm' / 'ignore'。"""
+        dialog = tk.Toplevel(self)
+        dialog.title("⚠️ Everything 索引設定")
+        dialog.resizable(False, False)
+        dialog.grab_set()
+        dialog.transient(self)
+
+        msg = (
+            "偵測到 Everything「建立日期」索引未開啟\n\n"
+            "您目前使用「建立日期」作為時間過濾，\n"
+            "但 Everything 尚未索引此欄位。\n\n"
+            "這會導致每次掃描需要 10~16 分鐘（如上次所見）。\n\n"
+            "請選擇解決方案："
+        )
+        ttk.Label(dialog, text=msg, justify=tk.LEFT, wraplength=420, padding=15).pack()
+
+        result = tk.StringVar(value='ignore')
+        btn_frame = ttk.Frame(dialog, padding=(15, 5, 15, 15))
+        btn_frame.pack(fill=tk.X)
+
+        def make_choice(val):
+            result.set(val)
+            dialog.destroy()
+
+        ttk.Button(btn_frame, text="🔧 自動開啟索引並重啟 Everything",
+                   command=lambda: make_choice('enable')).pack(fill=tk.X, pady=3)
+        ttk.Button(btn_frame, text="⚡ 本次改用「修改日期」（快速，語義稍有不同）",
+                   command=lambda: make_choice('this_time')).pack(fill=tk.X, pady=3)
+        ttk.Button(btn_frame, text="📦 一律改用「修改日期」（不再提示）",
+                   command=lambda: make_choice('always_dm')).pack(fill=tk.X, pady=3)
+        ttk.Button(btn_frame, text="⏳ 忽略，繼續使用建立日期（會很慢）",
+                   command=lambda: make_choice('ignore')).pack(fill=tk.X, pady=3)
+
+        dialog.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width()  - dialog.winfo_width())  // 2
+        y = self.winfo_y() + (self.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{x}+{y}")
+        dialog.wait_window()
+        return result.get()

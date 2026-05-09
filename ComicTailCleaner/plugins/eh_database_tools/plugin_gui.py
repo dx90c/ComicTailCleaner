@@ -151,6 +151,7 @@ def create_settings_frame(parent_frame: ttk.Frame,
     
     # 寫死路徑，不再存入 config
     ui_vars[f"{plugin_id}_automation_enabled"] = tk.BooleanVar(value=get('automation_enabled', False))
+    ui_vars[f"{plugin_id}_sync_enabled"] = tk.BooleanVar(value=get('eh_sync_enabled', False)) # 新增
 
     # 使用字典來儲存 Entry 引用
     widgets = {}
@@ -265,6 +266,7 @@ def create_settings_frame(parent_frame: ttk.Frame,
     
     auto_frame = ttk.Frame(box)
     auto_frame.grid(row=current_row, column=0, columnspan=3, sticky="w", padx=4, pady=2)
+    ttk.Checkbutton(auto_frame, text="啟用資料庫同步 (掃描路徑與空資料夾)", variable=ui_vars[f"{plugin_id}_sync_enabled"]).pack(side="left", padx=(0, 10))
     ttk.Checkbutton(auto_frame, text="啟用 UI 自動化 (更新 EMM 元數據)", variable=ui_vars[f"{plugin_id}_automation_enabled"]).pack(side="left")
     current_row += 1
 
@@ -288,17 +290,73 @@ def create_settings_frame(parent_frame: ttk.Frame,
     add_row("MMD JSON 路徑：", var_mmd_json, browse_type="file", widget_key='ent_json_auto', read_only=is_json_locked)
     
     # 備份/CSV：寫死路徑，只顯示 + 開啟資料夾按鈕
-    fixed_paths_label = "4. 固定路徑 (自動管理，無需手動設定)"
+    fixed_paths_label = "4. 固定路徑與備份管理 (自動管理)"
     add_section_label(fixed_paths_label)
-    
-    short_names = {FIXED_BACKUP_DIR: "data/.../Backups/", os.path.dirname(FIXED_CSV_PATH): "data/.../tagfailed.csv"}
-    for label_text, fixed_path in [("備份儲存：", FIXED_BACKUP_DIR), ("CSV 輸出：", os.path.dirname(FIXED_CSV_PATH))]:
-        row_f = ttk.Frame(box)
-        row_f.grid(row=current_row, column=0, columnspan=3, sticky="ew", padx=4, pady=2)
-        ttk.Label(row_f, text=label_text).pack(side="left")
-        ttk.Button(row_f, text="開啟資料夾", command=lambda p=fixed_path: _open_folder(p)).pack(side="left", padx=(4, 4))
-        ttk.Label(row_f, text=short_names[fixed_path], foreground="gray").pack(side="left")
-        current_row += 1
+
+    # --- 備份儲存列：開啟資料夾 + 還原按鈕 + 最新備份資訊 ---
+    backup_row = ttk.Frame(box)
+    backup_row.grid(row=current_row, column=0, columnspan=3, sticky="ew", padx=4, pady=2)
+    ttk.Label(backup_row, text="備份儲存：").pack(side="left")
+    ttk.Button(backup_row, text="開啟資料夾", command=lambda: _open_folder(FIXED_BACKUP_DIR)).pack(side="left", padx=(4, 4))
+
+    def _do_restore():
+        from plugins.eh_database_tools.processor import restore_latest_backup
+        mini_config = {
+            'eh_backup_directory': FIXED_BACKUP_DIR,
+            'eh_data_directory': var_data_dir.get().strip(),
+            'eh_manga_manager_path': var_mgr_exe.get().strip(),
+        }
+        if not mini_config['eh_data_directory']:
+            messagebox.showwarning("還原取消", "請先設定 EMM 資料夾路徑再執行還原。", parent=frame)
+            return
+        if not messagebox.askyesno("確認還原", "將把最新備份的 database.sqlite 與 metadata.sqlite 覆蓋到 EMM 資料夾。\n\n這會關閉目前正在執行的 EMM。確定繼續？", parent=frame):
+            return
+        ok, msg = restore_latest_backup(mini_config)
+        if ok:
+            messagebox.showinfo("還原成功", msg, parent=frame)
+        else:
+            messagebox.showerror("還原失敗", msg, parent=frame)
+
+    ttk.Button(backup_row, text="🔄 還原最新備份", command=_do_restore).pack(side="left", padx=(0, 6))
+
+    def _do_fix_pagediff():
+        from plugins.eh_database_tools.processor import fix_pagediff
+        mini_config = {
+            'eh_backup_directory': FIXED_BACKUP_DIR,
+            'eh_data_directory': var_data_dir.get().strip(),
+            'eh_manga_manager_path': var_mgr_exe.get().strip(),
+        }
+        if not messagebox.askyesno("確認修復", "將會自動把所有已標籤 (tagged) 項目的本地頁數對齊為網路頁數，藉此消除 Pagediff 警告。\n\n被修改的項目路徑將會記錄到 pagediff_fixed_log.txt 中。\n這會關閉目前正在執行的 EMM。確定繼續？", parent=frame):
+            return
+        ok, msg = fix_pagediff(mini_config)
+        if ok:
+            messagebox.showinfo("修復完成", msg, parent=frame)
+        else:
+            messagebox.showerror("修復失敗", msg, parent=frame)
+
+    ttk.Button(backup_row, text="✨ 一鍵修復 Pagediff", command=_do_fix_pagediff).pack(side="left", padx=(0, 6))
+
+    # 顯示最新備份時戳
+    def _get_latest_backup_label():
+        try:
+            sets = sorted([d for d in os.listdir(FIXED_BACKUP_DIR)
+                           if os.path.isdir(os.path.join(FIXED_BACKUP_DIR, d))])
+            if sets:
+                return f"最新備份：{sets[-1]}"
+        except Exception:
+            pass
+        return "尚無備份"
+
+    ttk.Label(backup_row, text=_get_latest_backup_label(), foreground="#888888").pack(side="left")
+    current_row += 1
+
+    # --- CSV 輸出列 ---
+    csv_row = ttk.Frame(box)
+    csv_row.grid(row=current_row, column=0, columnspan=3, sticky="ew", padx=4, pady=2)
+    ttk.Label(csv_row, text="CSV 輸出：").pack(side="left")
+    ttk.Button(csv_row, text="開啟資料夾", command=lambda: _open_folder(os.path.dirname(FIXED_CSV_PATH))).pack(side="left", padx=(4, 4))
+    ttk.Label(csv_row, text="data/.../tagfailed.csv", foreground="gray").pack(side="left")
+    current_row += 1
 
     # --- 狀態連動 ---
     def _toggle_enable(*_):
@@ -336,6 +394,7 @@ def save_settings(config: Dict[str, Any], ui_vars: Dict[str, tk.Variable]) -> Di
     config['eh_mmd_json_path']         = ui_vars[f"{pid}_mmd_json_path"].get().strip()
     config['eh_manga_manager_path']    = ui_vars[f"{pid}_manga_manager_path"].get().strip()
     config['automation_enabled']       = bool(ui_vars[f"{pid}_automation_enabled"].get())
+    config['eh_sync_enabled']          = bool(ui_vars[f"{pid}_sync_enabled"].get()) # 新增
     
     # 寫死路徑 (不再由用戶自訂，但仍存入 config 供 processor 讀取)
     config['eh_backup_directory']      = _normalize(FIXED_BACKUP_DIR)

@@ -22,6 +22,8 @@ if not getattr(sys, 'frozen', False):
 # --- v-MOD END ---
 
 from tkinter import messagebox
+from utils import install_runtime_log_tee, close_runtime_log_tee
+
 from gui.main_window import MainWindow
 # utils.check_and_install_packages 我們已經用更強大的 dependency_manager 取代了
 # 所以原本 utils 裡的檢查可以保留作為 fallback，或者在 utils 裡移除
@@ -65,4 +67,8 @@ def main() -> None:
 
 if __name__ == '__main__':
     freeze_support()
-    main()
+    install_runtime_log_tee(reset=True)
+    try:
+        main()
+    finally:
+        close_runtime_log_tee()

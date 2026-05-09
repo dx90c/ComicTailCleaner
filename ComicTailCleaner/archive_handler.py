@@ -14,10 +14,14 @@ from typing import Iterable, Set, IO, Optional, Union
 # --- 可選的 RAR 支援 ---
 try:
     import rarfile
-    # 優先使用程式目錄下的 UnRAR.exe，其次是系統路徑中的 unrar
-    local_unrar_tool = "UnRAR.exe"
-    if os.path.exists(local_unrar_tool):
-        rarfile.UNRAR_TOOL = local_unrar_tool
+    from config import ASSET_DIR
+    # 優先使用打包資源目錄下的 UnRAR.exe，其次是專案目錄下的，最後是系統路徑
+    bundled_unrar = os.path.join(ASSET_DIR, "UnRAR.exe")
+    if os.path.exists(bundled_unrar):
+        rarfile.UNRAR_TOOL = bundled_unrar
+        RAR_SUPPORTED = True
+    elif os.path.exists("UnRAR.exe"):
+        rarfile.UNRAR_TOOL = "UnRAR.exe"
         RAR_SUPPORTED = True
     else:
         from shutil import which
@@ -177,6 +181,9 @@ def apply_trailing_deletions(archive_path: str, to_delete: Set[str], keep_backup
     is_rar = archive_path.lower().endswith(('.rar', '.cbr')) and RAR_SUPPORTED
     tmp_path = archive_path + ".tmp_clean"
     original_count, final_count = 0, 0
+    is_tar = False
+    output_path = archive_path
+    bak_path = archive_path + ".bak"
     
     try:
         with open(archive_path, 'rb') as original_f:
@@ -188,7 +195,6 @@ def apply_trailing_deletions(archive_path: str, to_delete: Set[str], keep_backup
             tmp_path = output_path + ".tmp_clean"
             original_f.seek(0)
             
-            is_tar = False
             try:
                 with tarfile.open(fileobj=original_f, mode='r:*'): is_tar = True
             except (tarfile.ReadError, Exception): is_tar = False
@@ -221,15 +227,21 @@ def apply_trailing_deletions(archive_path: str, to_delete: Set[str], keep_backup
                                 final_count += 1
         
         # 替換檔案
-        bak_path = archive_path + ".bak"
-        if os.path.exists(bak_path): os.remove(bak_path)
-        
+        if os.path.exists(bak_path):
+            os.remove(bak_path)
+
         if keep_backup:
-            os.rename(archive_path, bak_path)
+            os.replace(archive_path, bak_path)
+            try:
+                os.replace(tmp_path, output_path)
+            except Exception:
+                if os.path.exists(bak_path) and not os.path.exists(archive_path):
+                    os.replace(bak_path, archive_path)
+                raise
         else:
-            os.remove(archive_path)
-            
-        os.rename(tmp_path, output_path)
+            os.replace(tmp_path, output_path)
+            if output_path != archive_path and os.path.exists(archive_path):
+                os.remove(archive_path)
         
         deleted_count = original_count - final_count
         note = "成功。RAR/TAR 已轉存為 CBZ。" if is_rar or is_tar else "成功。"

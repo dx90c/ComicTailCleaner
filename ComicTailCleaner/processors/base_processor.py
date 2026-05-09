@@ -21,6 +21,7 @@ class BaseProcessor:
             'pause': _DummyEvent(),
         }
         self.pool = None  # 有需要時才設置
+        self.cache_stats = {'hit': 0, 'recalc': 0, 'purge': 0, 'rescan_folders': 0}
 
     def _update_progress(self, p_type: str = 'text',
                          value: Optional[int] = None,

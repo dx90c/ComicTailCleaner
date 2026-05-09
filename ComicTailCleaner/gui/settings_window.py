@@ -8,12 +8,16 @@ import os
 import sys
 import datetime
 from multiprocessing import cpu_count
+try:
+    import send2trash
+except ImportError:
+    send2trash = None
 
 try: from tkcalendar import DateEntry
 except ImportError: DateEntry = None
 
-from config import APP_NAME_TC, APP_VERSION, CONFIG_FILE
-from utils import log_error, save_config, ARCHIVE_SUPPORT_ENABLED, QR_SCAN_ENABLED
+from config import APP_NAME_TC, APP_VERSION, CONFIG_FILE, DATA_DIR, CACHE_DIR
+from utils import log_error, save_config, ARCHIVE_SUPPORT_ENABLED, QR_SCAN_ENABLED, _sanitize_path_for_filename
 from .tooltip import Tooltip
 
 class SettingsGUI(tk.Toplevel):
@@ -28,6 +32,7 @@ class SettingsGUI(tk.Toplevel):
         self.worker_processes_var = tk.StringVar()
         self.similarity_threshold_var = tk.DoubleVar()
         self.qr_resize_var = tk.StringVar()
+        self.hash_resolution_var = tk.StringVar(value="128")
         
         self.mode_key_map_to_internal = {"mutual_comparison": "mutual_comparison", "ad_comparison": "ad_comparison", "qr_detection": "qr_detection"}
         for plugin_id in self.master.plugin_manager: self.mode_key_map_to_internal[plugin_id] = plugin_id
@@ -50,6 +55,7 @@ class SettingsGUI(tk.Toplevel):
         self.enable_color_filter_var = tk.BooleanVar()
         self.enable_whash_var = tk.BooleanVar()
         self.enable_archive_scan_var = tk.BooleanVar()
+        self.enable_everything_mft_scan_var = tk.BooleanVar()
         self.enable_targeted_search_var = tk.BooleanVar()  # v-MOD: 尋親模式
         self.enable_rotation_matching_var = tk.BooleanVar()  # v-MOD: 旋轉容差比對
         self.enable_image_preprocess_var  = tk.BooleanVar()  # v-MOD: 圖像前處理加強
@@ -291,6 +297,9 @@ class SettingsGUI(tk.Toplevel):
         self.archive_scan_cb = ttk.Checkbutton(path_frame, text="啟用壓縮檔掃描 (ZIP/CBZ/RAR/CBR)", variable=self.enable_archive_scan_var)
         self.archive_scan_cb.grid(row=2, column=0, columnspan=3, sticky="w", pady=5)
         if not ARCHIVE_SUPPORT_ENABLED: self.archive_scan_cb.config(text="啟用壓縮檔掃描 (未找到 archive_handler.py)", state=tk.DISABLED)
+        self.everything_scan_cb = ttk.Checkbutton(path_frame, text="⚡ 啟用 Everything SDK 秒搜 (如未安裝將自動下載 100KB 外掛)", variable=self.enable_everything_mft_scan_var)
+        self.everything_scan_cb.grid(row=3, column=0, columnspan=3, sticky="w", pady=(0, 5))
+        Tooltip(self.everything_scan_cb, "借用 Everything 軟體的系統服務，以 0.1 秒極速獲取全硬碟 MFT 變更檔，強烈建議啟用。\n需確保您的右下角任務列有運行 Everything 軟體。")
         row_idx += 1
         
         basic_settings_frame = ttk.LabelFrame(frame, text="基本與性能設定", padding="10")
@@ -312,8 +321,19 @@ class SettingsGUI(tk.Toplevel):
         self.extract_count_spinbox.grid(row=1, column=1, sticky="w", padx=5)
         ttk.Label(basic_settings_frame, text="(從每個資料夾樹末尾提取N張)").grid(row=1, column=2, sticky="w")
         ttk.Label(basic_settings_frame, text="工作進程數:").grid(row=3, column=0, sticky="w", pady=2)
-        ttk.Spinbox(basic_settings_frame, from_=0, to=cpu_count(), textvariable=self.worker_processes_var, width=5).grid(row=3, column=1, sticky="w", padx=5)
-        ttk.Label(basic_settings_frame, text="(0=自動)").grid(row=3, column=2, sticky="w")
+        worker_row = ttk.Frame(basic_settings_frame)
+        worker_row.grid(row=3, column=1, columnspan=2, sticky="w", padx=5)
+        ttk.Spinbox(worker_row, from_=0, to=cpu_count(), textvariable=self.worker_processes_var, width=5).pack(side=tk.LEFT)
+        ttk.Label(worker_row, text="(0=自動)").pack(side=tk.LEFT, padx=(4, 20))
+        ttk.Label(worker_row, text="圖片指紋基準:").pack(side=tk.LEFT)
+        self.hash_res_combo = ttk.Combobox(
+            worker_row,
+            textvariable=self.hash_resolution_var,
+            values=["標準 (64-bit)"],
+            width=13, state="readonly"
+        )
+        self.hash_res_combo.pack(side=tk.LEFT, padx=(4, 0))
+        Tooltip(self.hash_res_combo, "目前比對固定使用 64-bit (8x8) pHash 以確保 LSH 索引效能與相容性。\n資料庫仍會同步計算並存儲 256/1024-bit 數據供未來擴充使用。")
         ttk.Label(basic_settings_frame, text="相似度閾值 (%):").grid(row=4, column=0, sticky="w", pady=2)
         self.threshold_scale = ttk.Scale(basic_settings_frame, from_=70, to=100, orient="horizontal", variable=self.similarity_threshold_var, length=200, command=self._update_threshold_label)
         self.threshold_scale.grid(row=4, column=1, sticky="w", padx=5)
@@ -388,8 +408,9 @@ class SettingsGUI(tk.Toplevel):
         
         cache_time_frame = ttk.LabelFrame(frame, text="快取與篩選", padding="10")
         cache_time_frame.grid(row=row_idx, column=1, sticky="nsew", pady=5, padx=5)
-        ttk.Button(cache_time_frame, text="清理圖片快取 (回收桶)", command=self._clear_image_cache).pack(anchor="w", pady=2)
-        ttk.Button(cache_time_frame, text="清理資料夾快取 (回收桶)", command=self._clear_folder_cache).pack(anchor="w", pady=2)
+        ttk.Button(cache_time_frame, text="移除根目錄圖片快取 (回收桶)", command=self._clear_image_cache).pack(anchor="w", pady=2)
+        ttk.Button(cache_time_frame, text="移除廣告庫圖片快取 (回收桶)", command=self._clear_ad_cache).pack(anchor="w", pady=2)
+        ttk.Button(cache_time_frame, text="重建資料夾掃描索引", command=self._clear_folder_cache).pack(anchor="w", pady=2)
         ttk.Separator(cache_time_frame, orient='horizontal').pack(fill='x', pady=5)
         time_mode_frame = ttk.Frame(cache_time_frame); time_mode_frame.pack(anchor='w', pady=(5, 5))
         ttk.Label(time_mode_frame, text="時間篩選基準:").pack(side=tk.LEFT)
@@ -426,46 +447,100 @@ class SettingsGUI(tk.Toplevel):
         self.plugin_frame_row = row_idx
         row_idx += 1
         
+    def _build_scanned_cache_db_path(self, folder_path):
+        folder_path = (folder_path or "").strip()
+        if not folder_path:
+            return None
+        cache_name = _sanitize_path_for_filename(folder_path)
+        if not cache_name:
+            return None
+        return os.path.join(CACHE_DIR, f"scanned_hashes_cache_{cache_name}.db")
+
+    def _delete_sqlite_family(self, db_path):
+        removed = 0
+        for suffix in ("", "-wal", "-shm"):
+            target = db_path + suffix
+            if os.path.exists(target):
+                if send2trash is not None:
+                    send2trash.send2trash(target)
+                else:
+                    os.remove(target)
+                removed += 1
+        return removed
+
     def _clear_image_cache(self):
-        import os, glob
         from tkinter import messagebox
-        data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data')
-        if not os.path.exists(data_dir):
-            messagebox.showinfo("提示", "目前沒有任何快取需要清理。")
+
+        root_path = self.root_scan_folder_entry.get().strip()
+        db_path = self._build_scanned_cache_db_path(root_path)
+        if not db_path:
+            messagebox.showinfo("提示", "請先設定根掃描資料夾，才能將對應的圖片快取移至回收桶。")
+            return
+        if not os.path.exists(db_path):
+            messagebox.showinfo("提示", f"目前根目錄尚無圖片快取：\n{root_path}")
+            return
+        
+        if not messagebox.askyesno("警告", "⚠️ 警告：清理此快取將導致下次掃描時【全量重新計算特徵】，耗時將顯著增加！\n\n除非您更換了硬碟或懷疑快取損毀，否則不建議手動清理。\n\n您確定要繼續將其移至回收桶嗎？"):
             return
             
-        files = glob.glob(os.path.join(data_dir, 'scanned_hashes_cache_*.db'))
-        count = 0
-        for f in files:
-            try: 
-                os.remove(f)
-                count += 1
-            except OSError as e:
-                print(f"無法刪除 {f}: {e}")
-                
-        messagebox.showinfo("清理完成", f"已成功清除 {count} 個【圖片記憶快取】資料庫。\n這將強制讓下一次的掃描重新辨識所有圖片的特徵 (包含全新 QR 分析)。")
+        try:
+            removed = self._delete_sqlite_family(db_path)
+            action = "移至回收桶" if send2trash is not None else "刪除"
+            messagebox.showinfo("完成", f"已將目前根目錄的圖片快取{action}。\n路徑：{root_path}\n處理檔案數：{removed}")
+        except OSError as e:
+            messagebox.showerror("錯誤", f"處理目前根目錄圖片快取失敗：{e}")
 
     def _clear_folder_cache(self):
         import os, glob
         from tkinter import messagebox
-        data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data')
+        data_dir = CACHE_DIR
         if not os.path.exists(data_dir):
             messagebox.showinfo("提示", "目前沒有任何快取需要清理。")
             return
             
         files = glob.glob(os.path.join(data_dir, 'folder_state_cache_*.db'))
+        if not files:
+            messagebox.showinfo("提示", "目前沒有任何資料夾快取需要清理。")
+            return
+
+        if not messagebox.askyesno("警告", "⚠️ 警告：清理此快取將導致下次掃描時【全量重新計算特徵】，耗時將顯著增加！\n\n除非您更換了硬碟或懷疑快取損毀，否則不建議手動清理。\n\n您確定要繼續將其移至回收桶嗎？"):
+            return
+
         count = 0
         for f in files:
             try: 
-                os.remove(f)
-                count += 1
+                removed = self._delete_sqlite_family(f)
+                if removed > 0:
+                    count += 1
             except OSError as e:
                 print(f"無法刪除 {f}: {e}")
                 
         if hasattr(self.master, 'folder_cache') and isinstance(self.master.folder_cache, dict):
             self.master.folder_cache.clear()
             
-        messagebox.showinfo("清理完成", f"已成功清除 {count} 個【資料夾結點快取】資料庫。\n這將解除原本的 DFS 遞迴剪枝，強制下一次掃描時重新走訪所有子資料夾。")
+        action = "移至回收桶" if send2trash is not None else "刪除"
+        messagebox.showinfo("重建完成", f"已將 {count} 份資料夾狀態快取{action}。\n下次掃描時，系統會重新建立資料夾掃描索引。")
+
+    def _clear_ad_cache(self):
+        from tkinter import messagebox
+
+        ad_path = self.ad_folder_entry.get().strip()
+        db_path = self._build_scanned_cache_db_path(ad_path)
+        if not db_path:
+            messagebox.showinfo("提示", "請先設定廣告圖片資料夾，才能將對應的快取移至回收桶。")
+            return
+        if not os.path.exists(db_path):
+            messagebox.showinfo("提示", f"目前廣告資料夾尚無快取：\n{ad_path}")
+            return
+            
+        if not messagebox.askyesno("警告", "⚠️ 警告：清理此快取將導致下次掃描時【全量重新計算特徵】，耗時將顯著增加！\n\n除非您更換了硬碟或懷疑快取損毀，否則不建議手動清理。\n\n您確定要繼續將其移至回收桶嗎？"):
+            return
+        try:
+            removed = self._delete_sqlite_family(db_path)
+            action = "移至回收桶" if send2trash is not None else "刪除"
+            messagebox.showinfo("完成", f"已將目前廣告資料夾的快取{action}。\n路徑：{ad_path}\n處理檔案數：{removed}")
+        except OSError as e:
+            messagebox.showerror("錯誤", f"處理目前廣告資料夾快取失敗：{e}")
 
     def _set_today(self):
         """將結束日期設為今天"""
@@ -513,9 +588,12 @@ class SettingsGUI(tk.Toplevel):
         self.enable_whash_var.set(self.config.get('enable_whash', True))
         self.page_size_var.set(str(self.config.get('page_size', 'all')))
         self.enable_archive_scan_var.set(self.config.get('enable_archive_scan', True))
+        self.enable_everything_mft_scan_var.set(self.config.get('enable_everything_mft_scan', True))
         self.enable_targeted_search_var.set(self.config.get('enable_targeted_search', False))  # v-MOD
         self.enable_rotation_matching_var.set(self.config.get('enable_rotation_matching', False))  # v-MOD
         self.enable_image_preprocess_var.set(self.config.get('enable_image_preprocess', False))   # v-MOD
+        # 圖片指紋基準 (HASH-CONFIG-01 UI 修正：目前固定顯示 64-bit)
+        self.hash_resolution_var.set("標準 (64-bit)")
         
     def _setup_bindings(self):
         self.comparison_mode_var.trace_add("write", self._update_all_ui_states)
@@ -562,12 +640,14 @@ class SettingsGUI(tk.Toplevel):
                 'enable_ad_cross_comparison': self.enable_ad_cross_comparison_var.get(),
                 'page_size': self.page_size_var.get().strip(),
                 'enable_archive_scan': self.enable_archive_scan_var.get(),
+                'enable_everything_mft_scan': self.enable_everything_mft_scan_var.get(),
                 'enable_color_filter': self.enable_color_filter_var.get(),
                 'enable_whash': self.enable_whash_var.get(),
                 'folder_time_mode': folder_time_mode,
                 'enable_targeted_search': self.enable_targeted_search_var.get(),  # v-MOD
                 'enable_rotation_matching': self.enable_rotation_matching_var.get(),  # v-MOD
                 'enable_image_preprocess': self.enable_image_preprocess_var.get(),   # v-MOD
+                'hash_resolution': {"極速 (32px)": 32, "標準 (128px)": 128, "精準 (512px)": 512, "標準 (64-bit)": 128}.get(self.hash_resolution_var.get(), 128),
             }
             
             for var_key, var_obj in self.plugin_ui_vars.items():

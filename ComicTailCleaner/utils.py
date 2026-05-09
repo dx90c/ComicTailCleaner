@@ -15,7 +15,7 @@ import subprocess
 import threading
 import re
 from typing import Union, Optional, Tuple
-from config import INFO_LOG_FILE, ERROR_LOG_FILE
+from config import INFO_LOG_FILE, ERROR_LOG_FILE, DATA_DIR, LOG_DIR
 
 # 延遲導入或選擇性導入
 try:
@@ -51,6 +51,13 @@ from config import VPATH_PREFIX, VPATH_SEPARATOR
 PERFORMANCE_LOGGING_ENABLED = False
 psutil = None
 CACHE_LOCK = threading.Lock()
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+RUNTIME_LOG_FILE = None
+_TEE_LOCK = threading.RLock()
+_TEE_FILE = None
+_TEE_INSTALLED = False
+_ORIGINAL_STDOUT = sys.stdout
+_ORIGINAL_STDERR = sys.stderr
 
 # 在匯入時就進行可靠的 QR 功能檢查
 try:
@@ -70,7 +77,8 @@ __all__ = [
     '_norm_key', '_is_virtual_path', '_parse_virtual_path', '_sanitize_path_for_filename',
     '_open_image_from_any_path', '_get_file_stat', 'sim_from_hamming', 'hamming_from_sim',
     '_avg_hsv', '_color_gate', '_open_folder', '_reveal_in_explorer', 'check_and_install_packages',
-    'load_config', 'save_config', 'CACHE_LOCK', 'ARCHIVE_SUPPORT_ENABLED', 'QR_SCAN_ENABLED',
+    'load_config', 'save_config', 'reset_runtime_log', 'append_runtime_log_session_header', 'install_runtime_log_tee',
+    'close_runtime_log_tee', 'CACHE_LOCK', 'ARCHIVE_SUPPORT_ENABLED', 'QR_SCAN_ENABLED',
     '_auto_crop_white_borders'
 ]
 
@@ -106,19 +114,23 @@ def _auto_crop_white_borders(img: "Image.Image", tolerance: int = 240) -> "Image
 
 # --- 【v1.2.0 新增】 ---
 def _calculate_quick_digest(path: str) -> Optional[str]:
-    """計算檔案前 64KB 的 xxhash64 摘要，用於快速內容驗證。"""
+    """Hash only the first 64KB to avoid loading the whole file into memory."""
     if not xxhash:
         return None
     try:
         hasher = xxhash.xxh64()
-        with _open_image_from_any_path(path, read_bytes=True) as f:
-            if f is None: return None
-            chunk = f.read(65536) # 64KB
-            hasher.update(chunk)
+        if _is_virtual_path(path):
+            data = _open_image_from_any_path(path, read_bytes=True)
+            if data is None:
+                return None
+            hasher.update(data[:65536])
+        else:
+            with open(path, 'rb') as f:
+                hasher.update(f.read(65536))
         return hasher.hexdigest()
     except Exception:
         return None
-# --- 【新增結束】 ---
+# --- 輔助功能 ---
 
 def _norm_key(p: str) -> str:
     """統一路徑表示，從 core_engine 移至此處成為公共函式。"""
@@ -143,13 +155,206 @@ def _norm_key(p: str) -> str:
 
 # === 日誌函式 (修正版) ===
 
+class _RuntimeTee:
+    def __init__(self, stream):
+        self.stream = stream
+
+    @property
+    def encoding(self):
+        return getattr(self.stream, "encoding", None) or "utf-8"
+
+    def write(self, text):
+        if not isinstance(text, str):
+            text = str(text)
+        try:
+            self.stream.write(text)
+        except UnicodeEncodeError:
+            enc = self.encoding
+            self.stream.write(text.encode(enc, errors="replace").decode(enc, errors="replace"))
+        except Exception:
+            pass
+        with _TEE_LOCK:
+            if _TEE_FILE:
+                try:
+                    _TEE_FILE.write(text)
+                except Exception:
+                    pass
+
+    def flush(self):
+        try:
+            self.stream.flush()
+        except Exception:
+            pass
+        with _TEE_LOCK:
+            if _TEE_FILE:
+                try:
+                    _TEE_FILE.flush()
+                except Exception:
+                    pass
+
+    def isatty(self):
+        return bool(getattr(self.stream, "isatty", lambda: False)())
+
+
+def _safe_console_write(text: str):
+    try:
+        print(text, end='', flush=True)
+    except UnicodeEncodeError:
+        try:
+            encoding = getattr(sys.stdout, 'encoding', None) or 'utf-8'
+            safe_text = text.encode(encoding, errors='replace').decode(encoding, errors='replace')
+            print(safe_text, end='', flush=True)
+        except Exception:
+            print(text.encode('ascii', errors='replace').decode('ascii'), end='', flush=True)
+
+
+def _append_runtime_log(text: str):
+    if _TEE_INSTALLED:
+        return
+    if not RUNTIME_LOG_FILE:
+        return
+    try:
+        with open(RUNTIME_LOG_FILE, "a", encoding="utf-8", buffering=1) as f:
+            f.write(text)
+    except Exception:
+        pass
+
+
+def _new_runtime_log_path() -> str:
+    stamp = datetime.datetime.now().strftime("%m%d-%H%M%S")
+    path = os.path.join(LOG_DIR, f"LOG{stamp}.txt")
+    if os.path.exists(path):
+        path = os.path.join(LOG_DIR, f"LOG{stamp}-{os.getpid()}.txt")
+    return path
+
+
+def _cleanup_timestamp_runtime_logs(max_logs: int = 2):
+    try:
+        archives = []
+        for name in os.listdir(LOG_DIR):
+            if re.fullmatch(r"LOG\d{4}-\d{6}(?:-\d+)?\.txt", name):
+                path = os.path.join(LOG_DIR, name)
+                try:
+                    archives.append((os.path.getmtime(path), path))
+                except OSError:
+                    pass
+        archives.sort(reverse=True)
+        for _, old_path in archives[max_logs:]:
+            try:
+                os.remove(old_path)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
+def _rotate_accumulative_log(file_path: str, max_size_mb: float = 1.0):
+    """
+    自適應日誌輪轉：若檔案超過指定大小，則更名為 .bak（覆蓋舊備份）。
+    注意：此函式嚴禁呼叫 log_info/log_error 以免造成無窮遞迴。
+    """
+    if not os.path.exists(file_path):
+        return
+    try:
+        if os.path.getsize(file_path) > max_size_mb * 1024 * 1024:
+            bak_path = file_path + ".bak"
+            os.replace(file_path, bak_path)
+    except (OSError, PermissionError):
+        pass
+
+
+def reset_runtime_log():
+    global RUNTIME_LOG_FILE
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    header = f"# ComicTailCleaner run log\n# started_at={timestamp}\n\n"
+    try:
+        # 1. 累積日誌輪轉 (防止無限增長)
+        _rotate_accumulative_log(INFO_LOG_FILE)
+        _rotate_accumulative_log(ERROR_LOG_FILE)
+
+        # 2. 建立新的 Runtime Log
+        RUNTIME_LOG_FILE = _new_runtime_log_path()
+        with open(RUNTIME_LOG_FILE, "w", encoding="utf-8", buffering=1) as f:
+            f.write(header)
+        legacy_log = os.path.join(LOG_DIR, "LOG.txt")
+        if os.path.exists(legacy_log):
+            try:
+                os.remove(legacy_log)
+            except OSError:
+                pass
+        _cleanup_timestamp_runtime_logs(max_logs=2)
+    except Exception:
+        pass
+
+
+def append_runtime_log_session_header():
+    if not RUNTIME_LOG_FILE:
+        reset_runtime_log()
+        return
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    header = (
+        "\n"
+        "================================================================\n"
+        f"# ComicTailCleaner comparison started_at={timestamp}\n"
+        "================================================================\n\n"
+    )
+    try:
+        with open(RUNTIME_LOG_FILE, "a", encoding="utf-8", buffering=1) as f:
+            f.write(header)
+    except Exception:
+        pass
+
+
+def install_runtime_log_tee(reset: bool = True):
+    global _TEE_FILE, _TEE_INSTALLED
+    if _TEE_INSTALLED:
+        return
+    if reset:
+        reset_runtime_log()
+    else:
+        if not RUNTIME_LOG_FILE:
+            reset_runtime_log()
+        else:
+            append_runtime_log_session_header()
+    try:
+        _TEE_FILE = open(RUNTIME_LOG_FILE, "a", encoding="utf-8", buffering=1)
+        sys.stdout = _RuntimeTee(_ORIGINAL_STDOUT)
+        sys.stderr = _RuntimeTee(_ORIGINAL_STDERR)
+        _TEE_INSTALLED = True
+    except Exception:
+        _TEE_FILE = None
+        _TEE_INSTALLED = False
+
+
+def close_runtime_log_tee():
+    global _TEE_FILE, _TEE_INSTALLED
+    if not _TEE_INSTALLED:
+        return
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    sys.stdout = _ORIGINAL_STDOUT
+    sys.stderr = _ORIGINAL_STDERR
+    with _TEE_LOCK:
+        if _TEE_FILE:
+            try:
+                _TEE_FILE.flush()
+                _TEE_FILE.close()
+            except Exception:
+                pass
+            _TEE_FILE = None
+    _TEE_INSTALLED = False
+
 
 def log_error(message: str, include_traceback: bool = False):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_content = f"[{timestamp}] ERROR: {message}\n"
     if include_traceback:
         log_content += traceback.format_exc() + "\n"
-    print(log_content, end='', flush=True)
+    _safe_console_write(log_content)
+    _append_runtime_log(log_content)
     try:
         with open(ERROR_LOG_FILE, "a", encoding="utf-8-sig", buffering=1) as f:
             f.write(log_content)
@@ -159,7 +364,8 @@ def log_error(message: str, include_traceback: bool = False):
 def log_info(message: str):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_content = f"[{timestamp}] INFO: {message}\n"
-    print(log_content, end='', flush=True)
+    _safe_console_write(log_content)
+    _append_runtime_log(log_content)
     try:
         with open(INFO_LOG_FILE, "a", encoding="utf-8-sig", buffering=1) as f:
             f.write(log_content)
@@ -203,34 +409,52 @@ def _parse_virtual_path(vpath: str) -> Tuple[Optional[str], Optional[str]]:
         return None, None
 
 def _sanitize_path_for_filename(path: str) -> str:
-    """清理路徑字符串，使其可用於檔名。"""
+    """清理路徑中的非法字元"""
     if not path:
         return ""
     basename = os.path.basename(os.path.normpath(path))
-    sanitized = re.sub(r'[\\/*?:\"<>|]', '_', basename)
+    sanitized = re.sub(r'[\\/*?:"<>|]', '_', basename)
     return sanitized
 
-def _open_image_from_any_path(path: str) -> Optional[Image.Image]:
-    if Image is None: return None
-    try:
+def _open_image_from_any_path(path: str, read_bytes: bool = False) -> Optional[Union[Image.Image, bytes]]:
+    if Image is None:
+        return None
+
+    def _read_data():
         if _is_virtual_path(path):
             archive_path, inner_path = _parse_virtual_path(path)
             if archive_path and inner_path and archive_handler:
-                image_bytes = archive_handler.get_image_bytes(archive_path, inner_path)
-                if image_bytes:
-                    return Image.open(io.BytesIO(image_bytes))
+                return archive_handler.get_image_bytes(archive_path, inner_path)
+            return None
+        if os.path.exists(path):
+            with open(path, 'rb') as f:
+                return f.read()
+        return None
+
+    try:
+        lock = getattr(sys.modules[__name__], 'SHARED_IO_LOCK', None)
+        if lock is not None:
+            with lock:
+                image_bytes = _read_data()
         else:
-            if os.path.exists(path):
-                return Image.open(path)
+            image_bytes = _read_data()
+
+        if image_bytes is None:
+            return None
+        if read_bytes:
+            return image_bytes
+
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img.load()
+            return img.copy()
     except (UnidentifiedImageError, IOError, Exception):
-        pass
-    return None
+        return None
 
 def _get_file_stat(path: str) -> Tuple[Optional[int], Optional[float], Optional[float]]:
     real_path = path
     if _is_virtual_path(path):
         real_path, _ = _parse_virtual_path(path)
-    
+
     try:
         if real_path and os.path.exists(real_path):
             st = os.stat(real_path)
