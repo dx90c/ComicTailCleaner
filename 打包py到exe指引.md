@@ -1,100 +1,197 @@
-這是一份針對 **v16.0.2** 架構優化後的打包指引。
+# RELEASE-PACK-02 v17.1.0 PyInstaller 打包指引
 
-由於我們引入了 `gui/` 資料夾、新的外掛依賴 (`pyautogui`, `pyperclip` 等) 以及 SQLite，打包指令需要做相應的調整。為了盡量縮小體積，我保留了排除大型未用庫的參數，並加入了 UPX 壓縮建議。
+## 1. 目標
 
-### ComicTailCleaner 專案打包指引 (v16.0.2)
+本文件是 ComicTailCleaner v17.1.0 正式發布版專用的 exe 打包指引。
 
-**文件目的**: 將 Python 專案打包成單一 Windows 可執行檔 (.exe)，並透過參數優化檔案體積。
+v17 打包採兩階段：
 
----
+1. 先用 `scratch/build_release_package.py --execute` 複製一份乾淨 source。
+2. 再在乾淨 source 目錄中執行 PyInstaller。
 
-### 一、前置準備 (最重要的一步)
+這樣可避免把開發資料、EH/EMM DB、cache、LOG、指紋、安全網腳本與 UpdateRecords 打進發布版。
 
-為了避免打包進系統中不相關的雜物（這是 EXE 肥大的主因），強烈建議使用 **乾淨的虛擬環境 (Virtual Environment)**。
+## 2. 前置準備
 
-1.  **建立虛擬環境**:
-    ```bash
-    python -m venv venv
-    ```
-2.  **進入虛擬環境**:
-    ```bash
-    venv\Scripts\activate
-    ```
-3.  **只安裝必要套件** (這一步決定了體積大小):
-    ```bash
-    pip install pyinstaller pillow imagehash opencv-python numpy send2trash psutil pyautogui pyperclip tkcalendar nanoid rarfile
-    ```
-    *(注意：不要安裝 pandas, matplotlib 等沒用到的巨型套件)*
+建議使用乾淨虛擬環境：
 
-4.  **準備檔案結構**:
-    請將所有要打包的檔案放在同一個資料夾（例如 `build_dir`），結構應如下：
-    ```text
-    build_dir/
-    ├── app.py               (程式入口)
-    ├── config.py
-    ├── utils.py
-    ├── core_engine.py
-    ├── archive_handler.py
-    ├── dependency_manager.py
-    ├── gui/                 (GUI 模組資料夾)
-    ├── core/                (如果有的話)
-    ├── plugins/             (外掛資料夾)
-    ├── processors/          (處理器資料夾)
-    ├── UnRAR.exe            (必要工具)
-    ├── icon.ico             (圖示)
-    └── upx.exe              (推薦：放入 UPX 壓縮工具可減少約 30% 體積)
-    ```
-
----
-
-### 二、打包命令 (優化版)
-
-請在終端機切換到上述目錄，然後執行以下指令。
-
-#### 📋 單行版本 (直接複製貼上) 已不用upx.exe 
-
-```bash
-pyinstaller --noconfirm --clean --windowed --onefile --add-data "plugins;plugins" --add-data "UnRAR.exe;." --hidden-import="gui" --hidden-import="processors" --hidden-import="plugins" --hidden-import="sqlite3" --hidden-import="pyautogui" --hidden-import="pyperclip" --hidden-import="tkcalendar" --hidden-import="tqdm" --hidden-import="keyboard" --hidden-import="psutil" --collect-all="imagehash" --exclude-module="matplotlib" --exclude-module="pandas" --exclude-module="scipy.stats" --exclude-module="notebook" --exclude-module="test" --exclude-module="setuptools" "app.py"
+```cmd
+python -m venv .venv_pack
+.venv_pack\Scripts\activate
+python -m pip install --upgrade pip
 ```
 
-#### 📝 多行解析版 (了解細節)
+安裝 v17 建議依賴：
 
-```bash
+```cmd
+pip install pyinstaller pillow imagehash opencv-python numpy send2trash psutil pyautogui pyperclip keyboard tkcalendar tqdm nanoid rarfile pyzbar
+```
+
+注意：
+
+- 不建議安裝 `pandas`、`matplotlib`、`notebook` 等未使用的大型套件。
+- 若 `pyzbar` 需要額外 zbar runtime，打包後 QR 進階解碼可能需要另行驗證；目前 QR 仍有 OpenCV fallback。
+
+## 3. 一鍵腳本
+
+新增 v17 專用腳本：
+
+```text
+scratch\build_pyinstaller_exe.py
+```
+
+預設 dry-run，只顯示會執行的流程：
+
+```cmd
+python scratch\build_pyinstaller_exe.py
+```
+
+實際建立乾淨 source 並打包 exe：
+
+```cmd
+python scratch\build_pyinstaller_exe.py --execute
+```
+
+預設輸出檔名會自動加上分鐘時間戳，格式如下：
+
+```text
+ComicTailCleaner_v17_1_0_YYYYMMDD_HHMM.exe
+```
+
+若需要臨時測試名，仍可手動指定：
+
+```cmd
+python scratch\build_pyinstaller_exe.py --execute --app-name ComicTailCleaner_v17_1_0_test
+```
+
+輸出流程：
+
+```text
+dist_clean\ComicTailCleaner_clean_YYYYMMDD_HHMMSS\
+dist_clean\pyinstaller_work\
+dist_clean\pyinstaller_dist\
+```
+
+最終 exe 預期在：
+
+```text
+dist_clean\pyinstaller_dist\ComicTailCleaner_v17_1_0_YYYYMMDD_HHMM.exe
+```
+
+## 4. PyInstaller 核心規則
+
+v17 必須包含：
+
+- `plugins/`
+- `data/bin/Everything32.dll`
+- `data/bin/Everything64.dll`
+- `data/eh_database_tools/EhTagTranslation/`
+- `UnRAR.exe`
+
+v17 必須排除：
+
+- `data/configs/config.json`
+- `data/caches/`
+- `data/logs/`
+- `data/eh_database_tools/database.sqlite`
+- `data/eh_database_tools/metadata.sqlite`
+- `data/eh_database_tools/Backups/`
+- `scratch/`
+- `UpdateRecords/`
+
+## 5. 手動 PyInstaller 參考命令
+
+若不使用腳本，可先進入乾淨 source 目錄，再執行：
+
+```cmd
 pyinstaller --noconfirm --clean --windowed --onefile ^
- --upx-dir="." ^                         # 使用 UPX 壓縮 (需下載 upx.exe 放同目錄)
- --icon="icon.ico" ^                     # 設定圖示
- --add-data "plugins;plugins" ^          # 核心：將外掛資料夾完整打包，包含圖片素材
- --add-data "UnRAR.exe;." ^              # 核心：支援 RAR/CBR
- --hidden-import="gui" ^                 # 新增：確保掃描到 gui 套件
- --hidden-import="processors" ^          # 新增：確保掃描到 processors 套件
- --hidden-import="sqlite3" ^             # 新增：v16 核心改用 SQLite
- --hidden-import="pyautogui" ^           # 新增：EH 外掛依賴
- --hidden-import="pyperclip" ^           # 新增：EH 外掛依賴
- --hidden-import="tkcalendar" ^          # 新增：日期選擇器
- --collect-all="imagehash" ^             # 強制收集 imagehash 及其依賴 (如 pywt)
- --exclude-module="matplotlib" ^         # 排除肥大且未使用的庫
- --exclude-module="pandas" ^             # 排除肥大且未使用的庫
- --exclude-module="scipy.stats" ^        # 排除部分 scipy 模組 (imagehash 只需部分 scipy)
- --exclude-module="notebook" ^           # 排除 Jupyter 相關垃圾
- --exclude-module="setuptools" ^         # 排除開發工具
- "app.py"
+ --name "ComicTailCleaner_v17_1_0_YYYYMMDD_HHMM" ^
+ --add-data "plugins;plugins" ^
+ --add-data "data\eh_database_tools\EhTagTranslation;data\eh_database_tools\EhTagTranslation" ^
+ --add-binary "UnRAR.exe;." ^
+ --add-binary "data\bin\Everything32.dll;data\bin" ^
+ --add-binary "data\bin\Everything64.dll;data\bin" ^
+ --hidden-import "gui" ^
+ --hidden-import "processors" ^
+ --hidden-import "plugins" ^
+ --hidden-import "sqlite3" ^
+ --hidden-import "tkcalendar" ^
+ --hidden-import "tqdm" ^
+ --hidden-import "nanoid" ^
+ --hidden-import "pyautogui" ^
+ --hidden-import "pyperclip" ^
+ --hidden-import "keyboard" ^
+ --hidden-import "psutil" ^
+ --hidden-import "websocket" ^
+ --hidden-import "rarfile" ^
+ --hidden-import "cv2" ^
+ --hidden-import "numpy" ^
+ --hidden-import "pyzbar.pyzbar" ^
+ --collect-all "imagehash" ^
+ --collect-binaries "pyzbar" ^
+ --exclude-module "matplotlib" ^
+ --exclude-module "pandas" ^
+ --exclude-module "notebook" ^
+ --exclude-module "IPython" ^
+ --exclude-module "pytest" ^
+ --exclude-module "torch" ^
+ --exclude-module "torchvision" ^
+ --exclude-module "torchaudio" ^
+ --exclude-module "PyQt5" ^
+ --exclude-module "PyQt6" ^
+ --exclude-module "PySide2" ^
+ --exclude-module "PySide6" ^
+ --exclude-module "sklearn" ^
+ --exclude-module "tensorflow" ^
+ app.py
 ```
 
----
+注意：`scipy` 不列入正式版預設排除。`imagehash.phash/whash` 可能依賴 `scipy`，若要測試極限瘦身，只能使用 `--exclude-scipy` 另外打測試版，並完成三比、QR、相似卷宗與指紋巡檢驗證後再評估。
 
-### 三、常見問題與注意事項
+## 6. 驗證方式
 
-1.  **關於設定檔 (`config.json`)**：
-    *   新版程式 (`v16.0.2`) 具備強大的預設值生成能力。**不建議**打包 `config.json` 進去。
-    *   讓程式在使用者電腦第一次執行時自動生成 `data/config.json`，這樣最乾淨，也不會覆蓋使用者的設定。
+打包前：
 
-2.  **關於 `pyautogui` 與圖示識別**：
-    *   指令中的 `--add-data "plugins;plugins"` 至關重要。它確保了 `plugins/eh_database_tools/assets/` 下的按鈕截圖被正確打包。如果沒加這行，自動化功能會失效。
+```text
+一鍵指紋巡檢_L123.bat
+```
 
-3.  **防毒軟體誤報**：
-    *   使用 `--onefile` (單檔案) + `UPX` 壓縮的 EXE 很容易被 Windows Defender 誤判為病毒。
-    *   **解決方案**：如果只是自己用，沒關係。如果要發布給別人，建議拿掉 `--upx-dir="."` 參數，體積會變大一點，但被誤殺機率降低。
+打包後：
 
-4.  **關於 `dependency_manager.py`**：
-    *   這個檔案是用來檢查開發環境的。打包後的 EXE 不需要它運作（`app.py` 裡有判斷 `frozen` 狀態會跳過檢查），但 PyInstaller 會自動把它包進去，這無傷大雅。
+1. 將 exe 複製到乾淨測試資料夾。
+2. 啟動 exe。
+3. 確認 `data/configs/`、`data/caches/`、`data/logs/` 會在 exe 同層產生。
+4. 確認不會帶入開發機的 `config.json`、EH DB、cache 或 LOG。
+5. 開啟設定頁，確認外掛頁可載入。
+6. 做一次小範圍掃描或 sandbox 測試。
 
+## 7. 與 v16 指引差異
+
+v16 指引直接在專案目錄打包；v17 改為先產生乾淨 source，降低誤包私人資料與診斷檔的風險。
+
+v17 額外注意：
+
+- Everything DLL 位於 `data/bin/`。
+- EhTag 翻譯資料位於 `data/eh_database_tools/EhTagTranslation/`。
+- EH/EMM DB 絕不可打包。
+- 指紋巡檢、安全網與 UpdateRecords 只屬於開發目錄，不屬於發布版。
+
+## 8. 更新紀錄
+
+- **2026-05-10 01:35 (Codex)**:
+    - 複核 UPX 瘦身效果有限的原因：CFG 會讓 PyInstaller 跳過大量 DLL，真正肥大更可能來自環境中未使用的大型套件被 hook 掃入。
+    - `scratch/build_pyinstaller_exe.py` 新增低風險排除：`torch`、`torchvision`、`torchaudio`、`PyQt5/PyQt6`、`PySide2/PySide6`、`sklearn`、`tensorflow`。
+    - `scipy` 保留於正式版，另提供 `--exclude-scipy` 實驗參數，避免破壞 `imagehash.phash/whash` 導致三比、QR 或相似卷宗退化。
+- **2026-05-09 21:28 (Codex)**:
+    - 複核 EXE 版 EH 外掛無法啟動 EMM 的修補方向：保留 `websocket` hidden-import、EMM subprocess cwd、環境繼承與 `emm_subprocess.log` 診斷。
+    - 補強 `processor.py`：缺少 `websocket` 等依賴時，進度回報不會因 `update_progress` 尚未建立而二次崩潰；EMM subprocess 使用 `os.environ.copy()`，並在 `Popen` 後關閉父程序端 log handle。
+- **2026-05-09 21:07 (Codex)**:
+    - 更新 `scratch/build_pyinstaller_exe.py` 預設 exe 命名規則：BAT 不指定 `--app-name` 時，會輸出 `ComicTailCleaner_v17_1_0_YYYYMMDD_HHMM.exe`。
+    - `pyinstaller_build_report_*.txt/.json` 會同步記錄實際 `app_name`，方便對照是哪一次打包產物。
+- **2026-05-09 21:10 (Codex)**:
+    - 將 `config.py` 的公開版本號固定為 `APP_VERSION = "17.1.0"`，正式版 UI 與設定視窗不再顯示開發資料夾後綴 `502` 或重構標籤。
+    - 注意：已產出的舊 exe 不會自動改名或改顯示版本；需重新執行 `打包_v17.1.0_乾淨版EXE_execute.bat` 產生新版 exe。
+- **2026-05-09 20:53 (Antigravity)**: 
+    - 修正 `config.py`：引入 `ASSET_DIR` 與 `DATA_DIR` 區分邏輯，確保打包後 DLL 資源能從 `_MEIPASS` 正確釋放。
+    - 修正 `archive_handler.py`：更新 `UnRAR.exe` 偵測路徑，支援單檔 `.exe` 內部資源釋放。
+    - 驗收：使用者確認生成之 `.exe` 功能正常。
